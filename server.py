@@ -1,13 +1,20 @@
 """NED Freight App — FastAPI Server"""
 
-import json, math, os
+import json, math, os, hmac, hashlib
 from pathlib import Path
 from typing import Optional
 import uvicorn
+import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from zones import detect_zone, get_oversized_zone
+
+SHOPIFY_API_KEY    = os.environ.get("SHOPIFY_API_KEY", "")
+SHOPIFY_API_SECRET = os.environ.get("SHOPIFY_API_SECRET", "")
+APP_URL            = os.environ.get("APP_URL", "https://ned-freight-app.onrender.com")
+TOKEN_FILE         = Path(__file__).parent / "data" / "shopify_token.json"
 
 BASE_DIR = Path(__file__).parent
 RATES_FILE = BASE_DIR / "data" / "rates.json"
@@ -162,6 +169,55 @@ async def test_rate(province:str="", city:str="", postcode:str="", order_value:f
         rate = lookup_standard_rate(rates_data, std_zone, order_value)
         result.update({"service":"STANDARD","base_rate":rate,"freight_charge":math.ceil(rate+rural_surcharge) if rate is not None else None})
     return result
+
+@app.get("/shopify/install")
+async def shopify_install(shop: str):
+    scopes = "read_shipping,write_shipping"
+    redirect_uri = f"{APP_URL}/shopify/callback"
+    url = (f"https://{shop}/admin/oauth/authorize"
+           f"?client_id={SHOPIFY_API_KEY}&scope={scopes}"
+           f"&redirect_uri={redirect_uri}")
+    return RedirectResponse(url)
+
+@app.get("/shopify/callback")
+async def shopify_callback(code: str, shop: str, request: Request):
+    # Exchange code for permanent access token
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"https://{shop}/admin/oauth/access_token",
+            json={"client_id": SHOPIFY_API_KEY,
+                  "client_secret": SHOPIFY_API_SECRET,
+                  "code": code}
+        )
+    data = r.json()
+    token = data.get("access_token")
+    if not token:
+        raise HTTPException(400, f"Token exchange failed: {data}")
+
+    # Persist token
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_FILE.write_text(json.dumps({"shop": shop, "token": token}))
+
+    # Register carrier service
+    async with httpx.AsyncClient() as client:
+        cs = await client.post(
+            f"https://{shop}/admin/api/2024-04/carrier_services.json",
+            headers={"X-Shopify-Access-Token": token,
+                     "Content-Type": "application/json"},
+            json={"carrier_service": {
+                "name": "NED Freight",
+                "callback_url": f"{APP_URL}/shopify/rates",
+                "service_discovery": True
+            }}
+        )
+    cs_data = cs.json()
+    cs_id = cs_data.get("carrier_service", {}).get("id", "already exists")
+    return HTMLResponse(
+        f"<h2>✅ NED Freight connected!</h2>"
+        f"<p>Shop: <b>{shop}</b></p>"
+        f"<p>Carrier service ID: <b>{cs_id}</b></p>"
+        f"<p>Callback URL: <code>{APP_URL}/shopify/rates</code></p>"
+    )
 
 @app.get("/health")
 async def health(): return {"status":"ok","version":"1.0.0"}
