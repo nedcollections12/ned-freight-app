@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NED Freight Admin</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; }
+
+  header { background: #1a1a1a; color: #fff; padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.5px; }
+  header span { font-size: 13px; opacity: 0.5; }
+
+  nav { background: #fff; border-bottom: 1px solid #e5e5e5; padding: 0 24px; display: flex; gap: 0; }
+  nav button { background: none; border: none; padding: 14px 18px; font-size: 14px; color: #666; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+  nav button:hover { color: #1a1a1a; }
+  nav button.active { color: #1a1a1a; border-bottom-color: #1a1a1a; font-weight: 500; }
+
+  main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+
+  .tab { display: none; }
+  .tab.active { display: block; }
+
+  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .card p.hint { font-size: 13px; color: #888; margin-bottom: 16px; }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { background: #f8f8f8; font-weight: 600; padding: 8px 10px; text-align: left; white-space: nowrap; border: 1px solid #e5e5e5; }
+  td { padding: 4px 6px; border: 1px solid #e5e5e5; }
+  td.zone-name { font-weight: 500; padding: 6px 10px; background: #fafafa; white-space: nowrap; }
+  td input[type=number] { width: 68px; border: 1px solid #ddd; border-radius: 4px; padding: 4px 6px; font-size: 13px; text-align: right; }
+  td input[type=number]:focus { outline: none; border-color: #1a1a1a; }
+  td input[type=number].null-val { background: #f8f8f8; color: #bbb; }
+
+  /* Settings */
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 13px; font-weight: 500; }
+  .field input { border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
+  .field input:focus { outline: none; border-color: #1a1a1a; }
+  .field small { font-size: 12px; color: #888; }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 18px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; }
+  .btn-primary { background: #1a1a1a; color: #fff; }
+  .btn-primary:hover { background: #333; }
+  .btn-secondary { background: #fff; color: #1a1a1a; border: 1px solid #ddd; }
+  .btn-secondary:hover { background: #f5f5f5; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .actions { margin-top: 16px; display: flex; gap: 10px; align-items: center; }
+
+  /* Upload */
+  .upload-zone { border: 2px dashed #ddd; border-radius: 8px; padding: 32px; text-align: center; cursor: pointer; transition: border-color 0.15s; }
+  .upload-zone:hover, .upload-zone.drag { border-color: #1a1a1a; }
+  .upload-zone p { font-size: 14px; color: #666; margin-top: 8px; }
+  .upload-zone strong { font-size: 15px; }
+  input[type=file] { display: none; }
+  .radio-group { display: flex; gap: 16px; margin-bottom: 16px; }
+  .radio-group label { display: flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+
+  /* Test rate */
+  .test-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .result-box { background: #f8f8f8; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; margin-top: 16px; font-size: 14px; display: none; }
+  .result-box.show { display: block; }
+  .result-box .result-rate { font-size: 28px; font-weight: 700; color: #1a1a1a; margin: 8px 0; }
+  .result-box .result-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 12px; }
+  .result-box .result-meta span { font-size: 12px; color: #888; }
+  .result-box .result-meta strong { font-size: 13px; }
+
+  /* Toast */
+  #toast { position: fixed; bottom: 24px; right: 24px; background: #1a1a1a; color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transform: translateY(8px); transition: all 0.2s; pointer-events: none; z-index: 999; }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  #toast.error { background: #c0392b; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; background: #e8f5e9; color: #2e7d32; margin-left: 8px; }
+  .badge.red { background: #fdecea; color: #c62828; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>NED Freight Admin</h1>
+  <span>nedcollections.myshopify.com</span>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('standard')">Standard Rates</button>
+  <button onclick="showTab('oversized')">Oversized Rates</button>
+  <button onclick="showTab('settings')">Settings</button>
+  <button onclick="showTab('upload')">Upload CSV/Excel</button>
+  <button onclick="showTab('tester')">Rate Tester</button>
+</nav>
+
+<main>
+
+  <!-- STANDARD RATES -->
+  <div id="tab-standard" class="tab active">
+    <div class="card">
+      <h2>Standard Freight Rates <span style="font-weight:400;color:#888;font-size:13px;">— by zone and order value</span></h2>
+      <p class="hint">Rates in NZD (excl. rural surcharge). Leave blank or set to 0 for "Contact Us" (by_request zones are fixed).</p>
+      <div class="table-wrap" id="standard-table-wrap">Loading…</div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="saveRates()">Save Changes</button>
+        <span id="std-status" style="font-size:13px;color:#888;"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- OVERSIZED RATES -->
+  <div id="tab-oversized" class="tab">
+    <div class="card">
+      <h2>Oversized Freight Rates <span style="font-weight:400;color:#888;font-size:13px;">— by zone and cubic metres</span></h2>
+      <p class="hint">Applied when any item in the order has CBM &gt; 0.160 m³. Rates in NZD.</p>
+      <div class="table-wrap" id="oversized-table-wrap">Loading…</div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="saveRates()">Save Changes</button>
+        <span id="oz-status" style="font-size:13px;color:#888;"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div id="tab-settings" class="tab">
+    <div class="card">
+      <h2>Settings</h2>
+      <p class="hint">Global freight settings applied to all orders.</p>
+      <div class="settings-grid">
+        <div class="field">
+          <label>Free Freight Threshold (NZD)</label>
+          <input type="number" id="s-threshold" step="50" min="0">
+          <small>Orders at or above this value get free freight.</small>
+        </div>
+        <div class="field">
+          <label>Rural Surcharge (NZD)</label>
+          <input type="number" id="s-rural" step="1" min="0">
+          <small>Added when customer enters "Rural" in address line 2.</small>
+        </div>
+        <div class="field">
+          <label>Currency</label>
+          <input type="text" id="s-currency" maxlength="3" style="text-transform:uppercase;">
+          <small>ISO currency code, e.g. NZD.</small>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- UPLOAD -->
+  <div id="tab-upload" class="tab">
+    <div class="card">
+      <h2>Upload Rates File</h2>
+      <p class="hint">Upload a CSV or Excel (.xlsx) file to bulk-update rates. First column = zone ID, next 10 columns = rates for each tier/category.</p>
+
+      <div class="radio-group">
+        <label><input type="radio" name="upload-type" value="standard" checked> Standard rates</label>
+        <label><input type="radio" name="upload-type" value="oversized"> Oversized rates</label>
+      </div>
+
+      <div class="upload-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+        <strong>Click to choose a file</strong>
+        <p>or drag and drop a .csv or .xlsx here</p>
+        <p id="chosen-file" style="margin-top:8px;color:#1a1a1a;font-weight:500;"></p>
+      </div>
+      <input type="file" id="file-input" accept=".csv,.xlsx,.xls" onchange="onFileChosen(this)">
+
+      <div class="actions">
+        <button class="btn btn-primary" onclick="uploadFile()" id="upload-btn" disabled>Upload File</button>
+      </div>
+      <div id="upload-result" style="margin-top:16px;font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>File Format</h2>
+      <p class="hint">Example layout (standard rates). Zone IDs must match exactly.</p>
+      <div class="table-wrap">
+        <table>
+          <tr><th>zone_id</th><th>$0–150</th><th>$151–300</th><th>$301–500</th><th>… (10 cols total)</th></tr>
+          <tr><td class="zone-name">chch_local</td><td>5</td><td>8</td><td>13</td><td>…</td></tr>
+          <tr><td class="zone-name">outer_cant</td><td>8</td><td>12</td><td>18</td><td>…</td></tr>
+          <tr><td class="zone-name">far_north</td><td></td><td></td><td></td><td>(blank = by request)</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:12px;font-size:13px;color:#888;">Oversized zone IDs: <code>oz_chch, oz_si, oz_ni_lower, oz_waikato, oz_bop_gis, oz_taranaki, oz_ni_upper, oz_far_north</code></p>
+    </div>
+  </div>
+
+  <!-- RATE TESTER -->
+  <div id="tab-tester" class="tab">
+    <div class="card">
+      <h2>Rate Tester</h2>
+      <p class="hint">Simulate what freight rate Shopify would return for a given order.</p>
+      <div class="test-grid">
+        <div class="field">
+          <label>City</label>
+          <input type="text" id="t-city" placeholder="e.g. Christchurch">
+        </div>
+        <div class="field">
+          <label>Postcode</label>
+          <input type="text" id="t-postcode" placeholder="e.g. 8011">
+        </div>
+        <div class="field">
+          <label>Province / Region</label>
+          <input type="text" id="t-province" placeholder="e.g. Canterbury">
+        </div>
+        <div class="field">
+          <label>Order Value (NZD)</label>
+          <input type="number" id="t-value" placeholder="e.g. 450" min="0" step="1">
+        </div>
+        <div class="field">
+          <label>Total CBM (oversized items only)</label>
+          <input type="number" id="t-cbm" placeholder="e.g. 0.35" min="0" step="0.01">
+        </div>
+        <div class="field" style="justify-content:flex-end;">
+          <label style="flex-direction:row;align-items:center;gap:8px;font-weight:400;">
+            <input type="checkbox" id="t-rural"> Rural delivery
+          </label>
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="testRate()">Calculate Rate</button>
+
+      <div class="result-box" id="result-box">
+        <div style="font-size:13px;color:#888;" id="result-service"></div>
+        <div class="result-rate" id="result-rate"></div>
+        <div class="result-meta" id="result-meta"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<div id="toast"></div>
+
+<script>
+let ratesData = null;
+
+// ── Navigation ───────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ── Toast ────────────────────────────────────────────────────
+function toast(msg, isError = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.className = '', 3000);
+}
+
+// ── Load data ────────────────────────────────────────────────
+async function loadAll() {
+  const res = await fetch('/api/rates');
+  ratesData = await res.json();
+  renderStandard();
+  renderOversized();
+  renderSettings();
+}
+
+// ── Standard rates table ─────────────────────────────────────
+function renderStandard() {
+  const { tiers, zones, rates } = ratesData.standard;
+  let html = '<table><thead><tr><th>Zone</th>';
+  tiers.forEach(t => html += `<th>${t.label}</th>`);
+  html += '</tr></thead><tbody>';
+  zones.forEach(z => {
+    const byReq = z.by_request;
+    html += `<tr><td class="zone-name">${z.name}${byReq ? ' <span class="badge red">By Request</span>' : ''}</td>`;
+    const zr = rates[z.id] || [];
+    tiers.forEach((_, i) => {
+      const val = zr[i];
+      if (byReq) {
+        html += `<td><input type="number" class="null-val" value="" placeholder="—" data-type="standard" data-zone="${z.id}" data-idx="${i}" disabled></td>`;
+      } else {
+        html += `<td><input type="number" value="${val !== null && val !== undefined ? val : ''}" placeholder="—" min="0" step="1" data-type="standard" data-zone="${z.id}" data-idx="${i}" onchange="markChanged()"></td>`;
+      }
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('standard-table-wrap').innerHTML = html;
+}
+
+// ── Oversized rates table ────────────────────────────────────
+function renderOversized() {
+  const { categories, zones, rates } = ratesData.oversized;
+  let html = '<table><thead><tr><th>Zone</th>';
+  categories.forEach(c => html += `<th>${c.label}</th>`);
+  html += '</tr></thead><tbody>';
+  zones.forEach(z => {
+    const byReq = z.by_request;
+    html += `<tr><td class="zone-name">${z.name}${byReq ? ' <span class="badge red">By Request</span>' : ''}</td>`;
+    const zr = rates[z.id] || [];
+    categories.forEach((_, i) => {
+      const val = zr[i];
+      if (byReq) {
+        html += `<td><input type="number" class="null-val" value="" placeholder="—" data-type="oversized" data-zone="${z.id}" data-idx="${i}" disabled></td>`;
+      } else {
+        html += `<td><input type="number" value="${val !== null && val !== undefined ? val : ''}" placeholder="—" min="0" step="1" data-type="oversized" data-zone="${z.id}" data-idx="${i}" onchange="markChanged()"></td>`;
+      }
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('oversized-table-wrap').innerHTML = html;
+}
+
+// ── Settings ─────────────────────────────────────────────────
+function renderSettings() {
+  const s = ratesData.settings;
+  document.getElementById('s-threshold').value = s.free_freight_threshold ?? 7500;
+  document.getElementById('s-rural').value = s.rural_surcharge ?? 14;
+  document.getElementById('s-currency').value = s.currency ?? 'NZD';
+}
+
+function markChanged() {
+  document.getElementById('std-status').textContent = '● Unsaved changes';
+  document.getElementById('oz-status').textContent = '● Unsaved changes';
+}
+
+// ── Save rates ───────────────────────────────────────────────
+function collectRates() {
+  // Collect all inputs back into ratesData
+  document.querySelectorAll('input[data-type]').forEach(inp => {
+    const { type, zone, idx } = inp.dataset;
+    const i = parseInt(idx);
+    const val = inp.value.trim();
+    ratesData[type].rates[zone][i] = val === '' ? null : parseFloat(val);
+  });
+}
+
+async function saveRates() {
+  collectRates();
+  const res = await fetch('/api/rates', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ratesData)
+  });
+  if (res.ok) {
+    toast('Rates saved ✓');
+    document.getElementById('std-status').textContent = '';
+    document.getElementById('oz-status').textContent = '';
+  } else {
+    toast('Save failed', true);
+  }
+}
+
+async function saveSettings() {
+  const body = {
+    free_freight_threshold: parseFloat(document.getElementById('s-threshold').value),
+    rural_surcharge: parseFloat(document.getElementById('s-rural').value),
+    currency: document.getElementById('s-currency').value.toUpperCase()
+  };
+  const res = await fetch('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (res.ok) { toast('Settings saved ✓'); ratesData.settings = { ...ratesData.settings, ...body }; }
+  else toast('Save failed', true);
+}
+
+// ── Upload ───────────────────────────────────────────────────
+let chosenFile = null;
+
+function onFileChosen(input) {
+  chosenFile = input.files[0];
+  document.getElementById('chosen-file').textContent = chosenFile ? chosenFile.name : '';
+  document.getElementById('upload-btn').disabled = !chosenFile;
+}
+
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('drag');
+  const f = e.dataTransfer.files[0];
+  if (f) { chosenFile = f; document.getElementById('chosen-file').textContent = f.name; document.getElementById('upload-btn').disabled = false; }
+});
+
+async function uploadFile() {
+  if (!chosenFile) return;
+  const type = document.querySelector('input[name="upload-type"]:checked').value;
+  const fd = new FormData();
+  fd.append('file', chosenFile);
+  document.getElementById('upload-btn').disabled = true;
+  const res = await fetch(`/api/upload/${type}`, { method: 'POST', body: fd });
+  const data = await res.json();
+  document.getElementById('upload-btn').disabled = false;
+  const el = document.getElementById('upload-result');
+  if (res.ok) {
+    el.innerHTML = `<span style="color:#2e7d32">✓ Updated zones: ${data.updated_zones.join(', ') || 'none'}</span>`
+      + (data.errors.length ? `<br><span style="color:#c62828">Errors: ${data.errors.join('; ')}</span>` : '');
+    toast('Upload complete ✓');
+    await loadAll(); // refresh tables
+  } else {
+    el.innerHTML = `<span style="color:#c62828">Upload failed: ${JSON.stringify(data)}</span>`;
+    toast('Upload failed', true);
+  }
+}
+
+// ── Rate tester ──────────────────────────────────────────────
+async function testRate() {
+  const params = new URLSearchParams({
+    city: document.getElementById('t-city').value,
+    postcode: document.getElementById('t-postcode').value,
+    province: document.getElementById('t-province').value,
+    order_value: document.getElementById('t-value').value || 0,
+    cbm: document.getElementById('t-cbm').value || 0,
+    is_rural: document.getElementById('t-rural').checked
+  });
+  const res = await fetch('/api/test-rate?' + params);
+  const d = await res.json();
+  const box = document.getElementById('result-box');
+  box.classList.add('show');
+
+  const charge = d.freight_charge;
+  const svc = d.service;
+  document.getElementById('result-service').textContent = svc === 'FREE' ? 'Free Freight' : svc === 'OVERSIZED' ? 'Oversized Freight' : 'Standard Freight';
+  document.getElementById('result-rate').textContent = charge === null ? 'Contact Us' : charge === 0 ? 'FREE' : `$${charge.toFixed(2)} NZD`;
+
+  document.getElementById('result-meta').innerHTML = `
+    <div><span>Zone</span><br><strong>${d.zone}</strong></div>
+    <div><span>Oversized zone</span><br><strong>${d.oz_zone}</strong></div>
+    <div><span>Order value</span><br><strong>$${parseFloat(d.order_value).toFixed(2)}</strong></div>
+    <div><span>CBM</span><br><strong>${d.cbm}</strong></div>
+    <div><span>Base rate</span><br><strong>${d.base_rate !== undefined && d.base_rate !== null ? '$' + d.base_rate : '—'}</strong></div>
+    <div><span>Rural</span><br><strong>${d.is_rural ? 'Yes' : 'No'}</strong></div>
+  `;
+}
+
+// ── Init ─────────────────────────────────────────────────────
+loadAll();
+</script>
+</body>
+</html>
