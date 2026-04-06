@@ -1,0 +1,79 @@
+{
+  "settings": {
+    "free_freight_threshold": 7500,
+    "rural_surcharge": 14,
+    "currency": "NZD"
+  },
+  "standard": {
+    "tiers": [
+      {"label": "$0–$150",    "min": 0,    "max": 150},
+      {"label": "$151–$300",  "min": 151,  "max": 300},
+      {"label": "$301–$500",  "min": 301,  "max": 500},
+      {"label": "$501–$800",  "min": 501,  "max": 800},
+      {"label": "$801–$1200", "min": 801,  "max": 1200},
+      {"label": "$1201–$1800","min": 1201, "max": 1800},
+      {"label": "$1801–$2500","min": 1801, "max": 2500},
+      {"label": "$2501–$3500","min": 2501, "max": 3500},
+      {"label": "$3501–$5000","min": 3501, "max": 5000},
+      {"label": "$5001–$7500","min": 5001, "max": 7500}
+    ],
+    "zones": [
+      {"id": "chch_local",      "name": "Christchurch Local",                "carrier": "Castle Parcels"},
+      {"id": "outer_cant",      "name": "Outer Canterbury",                  "carrier": "Castle Parcels"},
+      {"id": "regional_si",     "name": "Regional South Island",             "carrier": "Castle Parcels"},
+      {"id": "south_island",    "name": "South Island",                      "carrier": "Castle Parcels"},
+      {"id": "ni_lower",        "name": "NI Lower",                          "carrier": "Castle Parcels"},
+      {"id": "waikato",         "name": "Waikato",                           "carrier": "Castle Parcels"},
+      {"id": "bop_gisborne",    "name": "Bay of Plenty / Gisborne",          "carrier": "Castle Parcels"},
+      {"id": "taranaki_wgn_hb", "name": "Taranaki / Wanganui / Hawke's Bay","carrier": "Castle Parcels"},
+      {"id": "ni_upper",        "name": "NI Upper (Auckland)",               "carrier": "Castle Parcels"},
+      {"id": "far_north",       "name": "Far North",                         "carrier": "Castle Parcels", "by_request": true}
+    ],
+    "rates": {
+      "chch_local":      [5,  8,  13, 18, 22, 26, 30, 35, 40, 50],
+      "outer_cant":      [8,  12, 18, 24, 30, 35, 42, 50, 60, 75],
+      "regional_si":     [10, 15, 22, 30, 38, 45, 55, 65, 78, 95],
+      "south_island":    [12, 18, 28, 38, 48, 58, 70, 85, 100, 120],
+      "ni_lower":        [15, 22, 34, 45, 57, 70, 85, 100, 120, 145],
+      "waikato":         [18, 26, 38, 50, 64, 78, 94, 112, 132, 158],
+      "bop_gisborne":    [20, 28, 42, 55, 70, 85, 102, 122, 145, 172],
+      "taranaki_wgn_hb": [22, 30, 46, 60, 76, 94, 112, 134, 158, 188],
+      "ni_upper":        [25, 32, 45, 58, 75, 92, 110, 132, 155, 180],
+      "far_north":       [null, null, null, null, null, null, null, null, null, null]
+    }
+  },
+  "oversized": {
+    "categories": [
+      {"label": "0.16–0.25m³", "min_cbm": 0.16, "max_cbm": 0.25},
+      {"label": "0.25–0.50m³", "min_cbm": 0.25, "max_cbm": 0.50},
+      {"label": "0.50–0.75m³", "min_cbm": 0.50, "max_cbm": 0.75},
+      {"label": "0.75–1.00m³", "min_cbm": 0.75, "max_cbm": 1.00},
+      {"label": "1.00–1.25m³", "min_cbm": 1.00, "max_cbm": 1.25},
+      {"label": "1.25–1.50m³", "min_cbm": 1.25, "max_cbm": 1.50},
+      {"label": "1.50–1.75m³", "min_cbm": 1.50, "max_cbm": 1.75},
+      {"label": "1.75–2.00m³", "min_cbm": 1.75, "max_cbm": 2.00},
+      {"label": "2.00–2.50m³", "min_cbm": 2.00, "max_cbm": 2.50},
+      {"label": "2.50m³+",     "min_cbm": 2.50, "max_cbm": 9999}
+    ],
+    "zones": [
+      {"id": "oz_chch",     "name": "Christchurch"},
+      {"id": "oz_si",       "name": "South Island"},
+      {"id": "oz_ni_lower", "name": "NI Lower"},
+      {"id": "oz_waikato",  "name": "Waikato"},
+      {"id": "oz_bop_gis",  "name": "Bay of Plenty / Gisborne"},
+      {"id": "oz_taranaki", "name": "Taranaki / Wanganui / HB"},
+      {"id": "oz_ni_upper", "name": "NI Upper (Auckland)"},
+      {"id": "oz_far_north","name": "Far North", "by_request": true}
+    ],
+    "rates": {
+      "oz_chch":     [40,  40,  50,  65,  80,  95,  110, 125, 145, 175],
+      "oz_si":       [55,  55,  70,  90,  110, 135, 158, 180, 210, 260],
+      "oz_ni_lower": [60,  60,  75,  100, 125, 152, 178, 205, 238, 295],
+      "oz_waikato":  [62,  62,  80,  108, 135, 165, 193, 222, 258, 320],
+      "oz_bop_gis":  [63,  63,  82,  110, 138, 168, 197, 226, 263, 325],
+      "oz_taranaki": [64,  64,  83,  112, 140, 172, 200, 230, 268, 332],
+      "oz_ni_upper": [65,  65,  85,  115, 150, 185, 215, 250, 285, 350],
+      "oz_far_north":[null,null,null,null,null,null,null,null,null,null]
+    }
+  }
+}
