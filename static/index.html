@@ -94,6 +94,7 @@
   <button onclick="showTab('settings')">Settings</button>
   <button onclick="showTab('upload')">Upload CSV/Excel</button>
   <button onclick="showTab('tester')">Rate Tester</button>
+  <button onclick="showTab('sync')">Shopify Sync</button>
 </nav>
 
 <main>
@@ -188,6 +189,24 @@
         </table>
       </div>
       <p style="margin-top:12px;font-size:13px;color:#888;">Oversized zone IDs: <code>oz_chch, oz_si, oz_ni_lower, oz_waikato, oz_bop_gis, oz_taranaki, oz_ni_upper, oz_far_north</code></p>
+    </div>
+  </div>
+
+  <!-- SHOPIFY SYNC -->
+  <div id="tab-sync" class="tab">
+    <div class="card">
+      <h2>Sync Oversized Zones to Shopify</h2>
+      <p class="hint">Pushes regional flat rates into all Shopify profiles named "Oversized Products …". Replaces any existing broad NZ zone with 7 regional zones based on your Oversized Rates table (using the starting CBM tier).</p>
+
+      <table style="font-size:13px;width:100%;margin-bottom:16px;">
+        <thead><tr><th style="text-align:left;padding:6px 10px;background:#f8f8f8;border:1px solid #e5e5e5;">Shopify Zone</th><th style="text-align:left;padding:6px 10px;background:#f8f8f8;border:1px solid #e5e5e5;">NZ Regions covered</th><th style="text-align:right;padding:6px 10px;background:#f8f8f8;border:1px solid #e5e5e5;">Base rate</th></tr></thead>
+        <tbody id="sync-preview"></tbody>
+      </table>
+
+      <p style="font-size:12px;color:#888;margin-bottom:16px;">⚠️ Far North is excluded (marked "By Request" in your rates — customers should contact you).</p>
+
+      <button class="btn btn-primary" onclick="runSync()" id="sync-btn">Sync Zones to Shopify</button>
+      <div id="sync-result" style="margin-top:16px;font-size:13px;"></div>
     </div>
   </div>
 
@@ -437,6 +456,75 @@ async function testRate() {
     <div><span>Rural</span><br><strong>${d.is_rural ? 'Yes' : 'No'}</strong></div>
   `;
 }
+
+// ── Shopify Sync ─────────────────────────────────────────────
+const SYNC_ZONES = [
+  {name:"Christchurch",             regions:"Canterbury",                          key:"oz_chch"},
+  {name:"South Island",             regions:"Otago, Southland, Marlborough, West Coast, Nelson, Tasman", key:"oz_si"},
+  {name:"NI Lower",                 regions:"Wellington, Manawatu-Whanganui, Hawke's Bay", key:"oz_ni_lower"},
+  {name:"Waikato",                  regions:"Waikato",                             key:"oz_waikato"},
+  {name:"Bay of Plenty / Gisborne", regions:"Bay of Plenty, Gisborne",            key:"oz_bop_gis"},
+  {name:"Taranaki",                 regions:"Taranaki",                            key:"oz_taranaki"},
+  {name:"Auckland",                 regions:"Auckland",                            key:"oz_ni_upper"},
+];
+
+function renderSyncPreview() {
+  if (!ratesData) return;
+  const rates = ratesData.oversized.rates;
+  const tbody = document.getElementById('sync-preview');
+  tbody.innerHTML = SYNC_ZONES.map(z => {
+    const rate = rates[z.key]?.[0];
+    return `<tr>
+      <td style="padding:5px 10px;border:1px solid #e5e5e5;font-weight:500;">${z.name}</td>
+      <td style="padding:5px 10px;border:1px solid #e5e5e5;color:#555;">${z.regions}</td>
+      <td style="padding:5px 10px;border:1px solid #e5e5e5;text-align:right;">$${rate ?? '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+const origShowTab = showTab;
+
+async function runSync() {
+  const btn = document.getElementById('sync-btn');
+  const out = document.getElementById('sync-result');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  out.innerHTML = '';
+  try {
+    const res = await fetch('/api/sync-shopify-zones', {method:'POST'});
+    const d   = await res.json();
+    if (d.error) {
+      out.innerHTML = `<span style="color:#c62828">❌ ${d.error}</span>`;
+      toast(d.error, true);
+    } else {
+      let html = '';
+      for (const r of d.results) {
+        if (r.success) {
+          html += `<p style="color:#2e7d32">✅ <b>${r.profile}</b> — ${r.zones_created} zones created, ${r.zones_deleted} old zone(s) removed</p>`;
+        } else {
+          const errs = r.errors.map(e => e.message).join('; ');
+          html += `<p style="color:#c62828">❌ <b>${r.profile}</b> — ${errs}</p>`;
+        }
+      }
+      out.innerHTML = html;
+      toast(d.results.every(r => r.success) ? 'Sync complete ✓' : 'Sync finished with errors', !d.results.every(r => r.success));
+    }
+  } catch(e) {
+    out.innerHTML = `<span style="color:#c62828">Request failed: ${e}</span>`;
+    toast('Sync failed', true);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Sync Zones to Shopify';
+}
+
+// Patch showTab to render preview when switching to sync tab
+window.showTab = function(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'sync') renderSyncPreview();
+};
 
 // ── Init ─────────────────────────────────────────────────────
 loadAll();

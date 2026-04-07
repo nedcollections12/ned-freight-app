@@ -219,6 +219,146 @@ async def shopify_callback(code: str, shop: str, request: Request):
         f"<p>Callback URL: <code>{APP_URL}/shopify/rates</code></p>"
     )
 
+@app.post("/api/sync-shopify-zones")
+async def sync_shopify_zones():
+    """Push oversized freight zones to Shopify as flat rates by NZ region."""
+    if not TOKEN_FILE.exists():
+        raise HTTPException(400, "No Shopify token found. Please reinstall the app first.")
+
+    token_data = json.loads(TOKEN_FILE.read_text())
+    token = token_data["token"]
+    shop  = token_data["shop"]
+    rates_data = load_rates()
+    oz_rates = rates_data["oversized"]["rates"]
+
+    headers  = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    gql_url  = f"https://{shop}/admin/api/2024-04/graphql.json"
+
+    # ── Step 1: fetch all delivery profiles ──────────────────────────────────
+    query = """
+    {
+      deliveryProfiles(first: 20) {
+        edges { node {
+          id name
+          profileLocationGroups {
+            locationGroup { id }
+            locationGroupZones(first: 30) {
+              edges { node { zone { id name } } }
+            }
+          }
+        }}
+      }
+    }
+    """
+    async with httpx.AsyncClient(timeout=30) as client:
+        r    = await client.post(gql_url, headers=headers, json={"query": query})
+        data = r.json()
+
+    all_profiles = [
+        e["node"]
+        for e in data.get("data", {}).get("deliveryProfiles", {}).get("edges", [])
+    ]
+    oversized = [p for p in all_profiles if "oversized" in p["name"].lower()]
+
+    if not oversized:
+        return {
+            "error": "No profiles with 'Oversized' in the name found",
+            "profiles_found": [p["name"] for p in all_profiles]
+        }
+
+    # ── NED zone → NZ province mapping ───────────────────────────────────────
+    # Province codes used by Shopify for New Zealand
+    zone_defs = [
+        {"name": "Christchurch",             "provinces": ["CAN"],                         "rate_key": "oz_chch"},
+        {"name": "South Island",             "provinces": ["OTA","STL","MBH","WTC","NSN","TAS"], "rate_key": "oz_si"},
+        {"name": "NI Lower",                 "provinces": ["WGN","MWT","HKB"],             "rate_key": "oz_ni_lower"},
+        {"name": "Waikato",                  "provinces": ["WKO"],                         "rate_key": "oz_waikato"},
+        {"name": "Bay of Plenty / Gisborne", "provinces": ["BOP","GIS"],                  "rate_key": "oz_bop_gis"},
+        {"name": "Taranaki",                 "provinces": ["TKI"],                         "rate_key": "oz_taranaki"},
+        {"name": "Auckland",                 "provinces": ["AUK"],                         "rate_key": "oz_ni_upper"},
+        {"name": "Far North",                "provinces": ["NTL"],                         "rate_key": "oz_far_north"},
+    ]
+
+    mutation = """
+    mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
+      deliveryProfileUpdate(id: $id, profile: $profile) {
+        profile { id name }
+        userErrors { field message }
+      }
+    }
+    """
+
+    results = []
+
+    for profile in oversized:
+        profile_id   = profile["id"]
+        profile_name = profile["name"]
+        lgroups      = profile.get("profileLocationGroups", [])
+
+        if not lgroups:
+            results.append({"profile": profile_name, "error": "No location groups found"})
+            continue
+
+        lg    = lgroups[0]
+        lg_id = lg["locationGroup"]["id"]
+        existing_zone_ids = [
+            e["node"]["zone"]["id"]
+            for e in lg.get("locationGroupZones", {}).get("edges", [])
+        ]
+
+        # Build zone create payloads — use tier-0 rate (smallest CBM, 0.16–0.25 m³)
+        zones_to_create = []
+        for zdef in zone_defs:
+            rate = oz_rates.get(zdef["rate_key"], [None])[0]
+            if rate is None:
+                # Far North — by request, skip (no flat rate)
+                continue
+            zones_to_create.append({
+                "zone": {
+                    "name": zdef["name"],
+                    "countries": [{
+                        "code": "NZ",
+                        "includeAllProvinces": False,
+                        "provinces": [{"code": p} for p in zdef["provinces"]]
+                    }]
+                },
+                "methodDefinitionsToCreate": [{
+                    "name": "Oversized Freight",
+                    "active": True,
+                    "rateDefinition": {
+                        "price": {"amount": str(float(rate)), "currencyCode": "NZD"}
+                    }
+                }]
+            })
+
+        variables = {
+            "id": profile_id,
+            "profile": {
+                "locationGroupsToUpdate": [{
+                    "id": lg_id,
+                    "zonesToCreate": zones_to_create,
+                    "zonesToDelete": existing_zone_ids
+                }]
+            }
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            r      = await client.post(gql_url, headers=headers,
+                                       json={"query": mutation, "variables": variables})
+            result = r.json()
+
+        errs = (result.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+        results.append({
+            "profile":        profile_name,
+            "success":        len(errs) == 0,
+            "zones_created":  len(zones_to_create),
+            "zones_deleted":  len(existing_zone_ids),
+            "errors":         errs,
+        })
+
+    return {"results": results, "profiles_processed": len(oversized)}
+
+
 @app.get("/health")
 async def health(): return {"status":"ok","version":"1.0.0"}
 
