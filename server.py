@@ -417,6 +417,67 @@ async def sync_shopify_zones():
     return {"results": results, "profiles_processed": len(oversized)}
 
 
+@app.get("/api/check-zones")
+async def check_zones():
+    """Return zone names, province codes, and rates for every Oversized profile."""
+    if not TOKEN_FILE.exists():
+        raise HTTPException(400, "No token.")
+    token_data = json.loads(TOKEN_FILE.read_text())
+    token, shop = token_data["token"], token_data["shop"]
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    gql_url = f"https://{shop}/admin/api/2024-04/graphql.json"
+    query = """
+    {
+      deliveryProfiles(first: 20) {
+        edges { node {
+          id name
+          profileLocationGroups {
+            locationGroupZones(first: 30) {
+              edges { node {
+                zone {
+                  id name
+                  countries {
+                    code
+                    provinces { code name }
+                  }
+                }
+                methodDefinitions(first: 5) {
+                  edges { node {
+                    name
+                    rateProvider { ... on DeliveryRateDefinition { price { amount } } }
+                  }}
+                }
+              }}
+            }
+          }
+        }}
+      }
+    }
+    """
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(gql_url, headers=headers, json={"query": query})
+        data = r.json()
+    out = []
+    for e in data.get("data", {}).get("deliveryProfiles", {}).get("edges", []):
+        p = e["node"]
+        if "oversized" not in p["name"].lower():
+            continue
+        zones = []
+        for lg in p.get("profileLocationGroups", []):
+            for ze in lg.get("locationGroupZones", {}).get("edges", []):
+                z = ze["node"]["zone"]
+                methods = [
+                    {"name": m["node"]["name"],
+                     "price": m["node"]["rateProvider"].get("price", {}).get("amount")}
+                    for m in ze["node"]["methodDefinitions"]["edges"]
+                ]
+                provinces = [pr["code"] for c in z["countries"] for pr in c["provinces"]]
+                zones.append({"zone_id": z["id"], "zone_name": z["name"],
+                              "provinces": provinces, "rates": methods})
+        out.append({"profile": p["name"], "zone_count": len(zones), "zones": zones})
+    return out
+
+
 @app.get("/health")
 async def health(): return {"status":"ok","version":"1.0.0"}
 
