@@ -232,11 +232,20 @@ async def sync_shopify_zones():
     headers  = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     gql_url  = f"https://{shop}/admin/api/2024-04/graphql.json"
 
-    # ── 9-zone structure + province codes (source: NED_Collections_Oversized_Shipping_Profiles.xlsx) ──
+    # ── 12-zone structure: SI split into individual province zones to prevent
+    #    Shopify from merging "Upper SI" + "Lower SI" into one "South Island" zone.
+    #    Canterbury (CAN) stays separate as a single-province zone; same principle
+    #    is applied to all remaining SI provinces. ──────────────────────────────
     ZONE_DEFS = [
         {"name": "Christchurch",              "provinces": ["CAN"]},
-        {"name": "Upper South Island",        "provinces": ["MBH","WTC","NSN","TAS"]},
-        {"name": "Lower South Island",        "provinces": ["OTA","STL"]},
+        # Upper South Island (individual province zones)
+        {"name": "Marlborough",               "provinces": ["MBH"]},
+        {"name": "Nelson / Tasman",           "provinces": ["NSN","TAS"]},
+        {"name": "West Coast",                "provinces": ["WTC"]},
+        # Lower South Island (individual province zones)
+        {"name": "Otago",                     "provinces": ["OTA"]},
+        {"name": "Southland",                 "provinces": ["STL"]},
+        # North Island
         {"name": "NI Lower",                  "provinces": ["WGN"]},
         {"name": "Waikato",                   "provinces": ["WKO"]},
         {"name": "Bay of Plenty / Gisborne",  "provinces": ["BOP","GIS"]},
@@ -248,10 +257,15 @@ async def sync_shopify_zones():
     # Flat rates per zone per CBM tier (source: "Oversized Shopify Rates" tab)
     # Tier index: 0=0.16-0.25, 1=0.25-0.50, 2=0.50-0.75, 3=0.75-1.00, 4=1.00-1.25,
     #             5=1.25-1.50, 6=1.50-1.75, 7=1.75-2.00, 8=2.00-2.50, 9=2.50+
+    # Upper SI rate applies to: Marlborough, Nelson/Tasman, West Coast
+    # Lower SI rate applies to: Otago, Southland
     ZONE_RATES = {
         "Christchurch":              [ 40,  40,  40,  40,  40,  45,  55,  60,  70,  85],
-        "Upper South Island":        [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
-        "Lower South Island":        [ 65,  65,  65,  85, 105, 130, 155, 175, 200, 245],
+        "Marlborough":               [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
+        "Nelson / Tasman":           [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
+        "West Coast":                [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
+        "Otago":                     [ 65,  65,  65,  85, 105, 130, 155, 175, 200, 245],
+        "Southland":                 [ 65,  65,  65,  85, 105, 130, 155, 175, 200, 245],
         "NI Lower":                  [ 65,  65,  75,  95, 120, 150, 175, 200, 230, 285],
         "Waikato":                   [ 65,  65,  85, 120, 150, 185, 220, 255, 285, 355],
         "Bay of Plenty / Gisborne":  [ 65,  65,  85, 120, 155, 185, 220, 255, 290, 355],
@@ -356,62 +370,34 @@ async def sync_shopify_zones():
                 }]
             }
 
-        # Split: 7 non-SI zones go in call 1 (with deletions); Upper SI and Lower SI
-        # each get their own call so Shopify cannot merge them into one "South Island" zone.
-        si_zones  = [z for z in ZONE_DEFS if "south island" in z["name"].lower()]
-        base_zones = [z for z in ZONE_DEFS if "south island" not in z["name"].lower()]
-
-        # ── Call 1: delete existing + create 7 non-SI zones ──────────────────
-        call1_payload = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx]) for z in base_zones]
+        # ── Single call: delete all existing zones + create all 12 new zones ───
+        # SI provinces are now individual province zones (Marlborough, Nelson/Tasman,
+        # West Coast, Otago, Southland) so Shopify treats each like it treats Canterbury —
+        # keeping them separate rather than merging into a single "South Island" zone.
+        all_zone_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx]) for z in ZONE_DEFS]
         variables = {
             "id": profile_id,
             "profile": {
                 "locationGroupsToUpdate": [{
                     "id": lg_id,
-                    "zonesToCreate": call1_payload,
+                    "zonesToCreate": all_zone_payloads,
                     "zonesToDelete": existing_zone_ids
                 }]
             }
         }
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(gql_url, headers=headers,
                                   json={"query": mutation, "variables": variables})
             r1 = r.json()
 
         errs = (r1.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-        if errs:
-            results.append({"profile": profile_name, "success": False,
-                            "tier_index": tier_idx, "errors": errs})
-            continue
-
-        # ── Calls 2 & 3: add each SI zone separately ─────────────────────────
-        si_errors = []
-        for zdef in si_zones:
-            rate = ZONE_RATES[zdef["name"]][tier_idx]
-            variables = {
-                "id": profile_id,
-                "profile": {
-                    "locationGroupsToUpdate": [{
-                        "id": lg_id,
-                        "zonesToCreate": [make_zone_payload(zdef, rate)]
-                    }]
-                }
-            }
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.post(gql_url, headers=headers,
-                                      json={"query": mutation, "variables": variables})
-                rd = r.json()
-            si_errs = (rd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-            si_errors.extend(si_errs)
-
-        all_errors = errs + si_errors
         results.append({
             "profile":       profile_name,
-            "success":       len(all_errors) == 0,
+            "success":       len(errs) == 0,
             "tier_index":    tier_idx,
-            "zones_created": len(base_zones) + len(si_zones),
+            "zones_created": len(ZONE_DEFS),
             "zones_deleted": len(existing_zone_ids),
-            "errors":        all_errors,
+            "errors":        errs,
         })
 
     return {"results": results, "profiles_processed": len(oversized)}
