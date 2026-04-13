@@ -393,8 +393,6 @@ async def sync_shopify_zones():
             continue
 
         # ── Step 2: create South Island zone in its own isolated mutation ─────
-        # Sending SI in a standalone call (no other zones created/deleted at the
-        # same time) to prevent Shopify's geographic merge from overriding our rate.
         si_vars = {
             "id": profile_id,
             "profile": {
@@ -409,19 +407,190 @@ async def sync_shopify_zones():
                                    json={"query": mutation, "variables": si_vars})
             sd = rs.json()
 
-        si_fix_errors = (sd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+        si_create_errors = (sd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+        if si_create_errors:
+            results.append({"profile": profile_name, "success": False,
+                            "tier_index": tier_idx, "errors": si_create_errors})
+            continue
+
+        # ── Step 3: fix SI rate via method def delete + recreate ─────────────
+        # Shopify persists a "remembered" $55 rate for this province set regardless
+        # of what rate we specify in zonesToCreate. Fix: query the created zone,
+        # delete the wrong method definition, create a new one at the correct rate.
+        profile_q = """
+        query($id: ID!) {
+          deliveryProfile(id: $id) {
+            profileLocationGroups {
+              locationGroupZones(first: 30) {
+                edges { node {
+                  zone { id name }
+                  methodDefinitions(first: 5) {
+                    edges { node {
+                      id
+                      rateProvider {
+                        ... on DeliveryRateDefinition { price { amount } }
+                      }
+                    }}
+                  }
+                }}
+              }
+            }
+          }
+        }
+        """
+        async with httpx.AsyncClient(timeout=30) as client:
+            rq = await client.post(gql_url, headers=headers,
+                                   json={"query": profile_q, "variables": {"id": profile_id}})
+            qd = rq.json()
+
+        # Find SI zone + method def
+        si_zone_id     = None
+        si_md_id       = None
+        si_stored_rate = None
+        for lg_data in (qd.get("data", {}).get("deliveryProfile") or {}).get("profileLocationGroups", []):
+            for ze in lg_data.get("locationGroupZones", {}).get("edges", []):
+                zn = ze["node"]
+                if (zn.get("zone") or {}).get("name") == "South Island":
+                    si_zone_id = zn["zone"]["id"]
+                    mds = zn.get("methodDefinitions", {}).get("edges", [])
+                    if mds:
+                        md = mds[0]["node"]
+                        si_md_id       = md["id"]
+                        si_stored_rate = (md.get("rateProvider") or {}).get("price", {}).get("amount")
+                    break
+            if si_zone_id:
+                break
+
+        rate_fix_info = {
+            "si_zone_id": si_zone_id,
+            "si_md_id":   si_md_id,
+            "si_stored_rate_before": si_stored_rate,
+        }
+
+        rate_fixed = False
+        rate_fix_errors = []
+        expected_rate_str = str(float(si_rate))  # e.g. "65.0"
+
+        if si_md_id and str(si_stored_rate) != expected_rate_str:
+            # Delete the wrong method definition
+            del_q = """
+            mutation($id: ID!) {
+              deliveryMethodDefinitionDelete(id: $id) {
+                deletedMethodDefinitionId
+                userErrors { field message }
+              }
+            }
+            """
+            async with httpx.AsyncClient(timeout=30) as client:
+                rd = await client.post(gql_url, headers=headers,
+                                       json={"query": del_q, "variables": {"id": si_md_id}})
+                dd = rd.json()
+            del_errs = (dd.get("data") or {}).get("deliveryMethodDefinitionDelete", {}).get("userErrors", [])
+            rate_fix_info["delete_errors"] = del_errs
+
+            if not del_errs and si_zone_id:
+                # Create new method def at correct rate
+                create_q = """
+                mutation($profileId: ID!, $zoneId: ID!, $md: DeliveryMethodDefinitionInput!) {
+                  deliveryMethodDefinitionCreate(profileId: $profileId, zoneId: $zoneId, methodDefinition: $md) {
+                    methodDefinition { id name }
+                    userErrors { field message }
+                  }
+                }
+                """
+                create_vars = {
+                    "profileId": profile_id,
+                    "zoneId":    si_zone_id,
+                    "md": {
+                        "name":   "Oversized Freight",
+                        "active": True,
+                        "rateDefinition": {
+                            "price": {"amount": str(float(si_rate)), "currencyCode": "NZD"}
+                        }
+                    }
+                }
+                async with httpx.AsyncClient(timeout=30) as client:
+                    rc = await client.post(gql_url, headers=headers,
+                                           json={"query": create_q, "variables": create_vars})
+                    cd = rc.json()
+                create_errs = (cd.get("data") or {}).get("deliveryMethodDefinitionCreate", {}).get("userErrors", [])
+                rate_fix_info["create_errors"] = create_errs
+                rate_fixed   = len(create_errs) == 0
+                rate_fix_errors = create_errs
+            else:
+                rate_fix_errors = del_errs
+        elif si_md_id:
+            rate_fixed = True  # rate was already correct
 
         results.append({
-            "profile":       profile_name,
-            "success":       len(si_fix_errors) == 0,
-            "tier_index":    tier_idx,
-            "si_rate_set":   si_rate,
-            "zones_created": len(ZONE_DEFS),
-            "zones_deleted": len(existing_zone_ids),
-            "errors":        si_fix_errors,
+            "profile":        profile_name,
+            "success":        rate_fixed or (si_md_id is None),
+            "tier_index":     tier_idx,
+            "si_rate_target": si_rate,
+            "si_rate_before": si_stored_rate,
+            "rate_fixed":     rate_fixed,
+            "zones_created":  len(ZONE_DEFS),
+            "zones_deleted":  len(existing_zone_ids),
+            "lg_id":          lg_id,
+            "rate_fix_info":  rate_fix_info,
+            "errors":         rate_fix_errors,
         })
 
     return {"results": results, "profiles_processed": len(oversized)}
+
+
+@app.get("/api/debug-profile")
+async def debug_profile(name: str = "Oversized 1.00-1.25m3"):
+    """Diagnostic: full zone+rate data for a single named profile."""
+    if not TOKEN_FILE.exists():
+        raise HTTPException(400, "No token.")
+    token_data = json.loads(TOKEN_FILE.read_text())
+    token, shop = token_data["token"], token_data["shop"]
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    gql_url = f"https://{shop}/admin/api/2024-04/graphql.json"
+
+    # First fetch profile list to find the ID
+    list_q = """{ deliveryProfiles(first: 20) { edges { node { id name } } } }"""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(gql_url, headers=headers, json={"query": list_q})
+        ld = r.json()
+    profile_id = None
+    for e in ld.get("data", {}).get("deliveryProfiles", {}).get("edges", []):
+        if e["node"]["name"].lower() == name.lower():
+            profile_id = e["node"]["id"]
+            break
+    if not profile_id:
+        return {"error": f"Profile '{name}' not found",
+                "available": [e["node"]["name"] for e in ld.get("data",{}).get("deliveryProfiles",{}).get("edges",[])]}
+
+    # Full query on this specific profile
+    detail_q = """
+    query($id: ID!) {
+      deliveryProfile(id: $id) {
+        id name
+        profileLocationGroups {
+          locationGroup { id }
+          locationGroupZones(first: 30) {
+            edges { node {
+              zone { id name countries { provinces { code } } }
+              methodDefinitions(first: 10) {
+                edges { node {
+                  id name active
+                  rateProvider {
+                    ... on DeliveryRateDefinition { price { amount currencyCode } }
+                  }
+                }}
+              }
+            }}
+          }
+        }
+      }
+    }
+    """
+    async with httpx.AsyncClient(timeout=30) as client:
+        r2 = await client.post(gql_url, headers=headers,
+                               json={"query": detail_q, "variables": {"id": profile_id}})
+        return {"profile_id": profile_id, "raw": r2.json()}
 
 
 @app.get("/api/raw-profile")
