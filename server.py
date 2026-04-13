@@ -365,14 +365,18 @@ async def sync_shopify_zones():
                 }]
             }
 
-        # ── Step 1: delete existing zones + create all new zones ─────────────
-        all_zone_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx]) for z in ZONE_DEFS]
+        si_rate     = ZONE_RATES["South Island"][tier_idx]
+        si_zone_def = next(z for z in ZONE_DEFS if z["name"] == "South Island")
+        non_si_defs = [z for z in ZONE_DEFS if z["name"] != "South Island"]
+
+        # ── Step 1: delete all existing zones + create only the non-SI zones ──
+        non_si_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx]) for z in non_si_defs]
         variables = {
             "id": profile_id,
             "profile": {
                 "locationGroupsToUpdate": [{
                     "id": lg_id,
-                    "zonesToCreate": all_zone_payloads,
+                    "zonesToCreate": non_si_payloads,
                     "zonesToDelete": existing_zone_ids
                 }]
             }
@@ -388,69 +392,24 @@ async def sync_shopify_zones():
                             "tier_index": tier_idx, "errors": errs})
             continue
 
-        # ── Step 2: Shopify sometimes ignores the rate for geographic SI zones.
-        #    Re-fetch the profile and explicitly fix the South Island zone's rate
-        #    by deleting its current method def and creating a new one. ─────────
-        si_rate = ZONE_RATES["South Island"][tier_idx]
-        fix_query = """
-        {
-          deliveryProfile(id: "%s") {
-            profileLocationGroups {
-              locationGroupZones(first: 30) {
-                edges { node {
-                  zone { id name }
-                  methodDefinitions(first: 5) {
-                    edges { node { id name } }
-                  }
-                }}
-              }
+        # ── Step 2: create South Island zone in its own isolated mutation ─────
+        # Sending SI in a standalone call (no other zones created/deleted at the
+        # same time) to prevent Shopify's geographic merge from overriding our rate.
+        si_vars = {
+            "id": profile_id,
+            "profile": {
+                "locationGroupsToUpdate": [{
+                    "id": lg_id,
+                    "zonesToCreate": [make_zone_payload(si_zone_def, si_rate)]
+                }]
             }
-          }
         }
-        """ % profile_id
         async with httpx.AsyncClient(timeout=30) as client:
-            rf = await client.post(gql_url, headers=headers, json={"query": fix_query})
-            fd = rf.json()
+            rs = await client.post(gql_url, headers=headers,
+                                   json={"query": mutation, "variables": si_vars})
+            sd = rs.json()
 
-        si_fix_errors = []
-        dp = (fd.get("data") or {}).get("deliveryProfile", {})
-        for lg2 in dp.get("profileLocationGroups", []):
-            for ze in lg2.get("locationGroupZones", {}).get("edges", []):
-                znode = ze["node"]
-                zname = znode.get("zone", {}).get("name", "")
-                if zname != "South Island":
-                    continue
-                zone_id_fix  = znode["zone"]["id"]
-                old_mdef_ids = [
-                    e["node"]["id"]
-                    for e in znode.get("methodDefinitions", {}).get("edges", [])
-                ]
-                # Delete old method defs + create correct one in one mutation
-                fix_vars = {
-                    "id": profile_id,
-                    "profile": {
-                        "locationGroupsToUpdate": [{
-                            "id": lg_id,
-                            "zonesToUpdate": [{
-                                "id": zone_id_fix,
-                                "methodDefinitionsToDelete": old_mdef_ids,
-                                "methodDefinitionsToCreate": [{
-                                    "name": "Oversized Freight",
-                                    "active": True,
-                                    "rateDefinition": {
-                                        "price": {"amount": str(float(si_rate)), "currencyCode": "NZD"}
-                                    }
-                                }]
-                            }]
-                        }]
-                    }
-                }
-                async with httpx.AsyncClient(timeout=30) as client:
-                    rx = await client.post(gql_url, headers=headers,
-                                          json={"query": mutation, "variables": fix_vars})
-                    xd = rx.json()
-                fix_errs = (xd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-                si_fix_errors.extend(fix_errs)
+        si_fix_errors = (sd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
 
         results.append({
             "profile":       profile_name,
