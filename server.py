@@ -415,7 +415,7 @@ async def sync_shopify_zones():
                 "profile": {
                     "locationGroupsToDelete": [lg_id],
                     "locationGroupsToCreate": [{
-                        "locations": {"locationsToAdd": location_ids},
+                        "locations": location_ids,
                         "zonesToCreate": all_zone_payloads
                     }]
                 }
