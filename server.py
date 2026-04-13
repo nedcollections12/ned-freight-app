@@ -500,6 +500,10 @@ async def check_zones():
         r = await client.post(gql_url, headers=headers, json={"query": query})
         data = r.json()
 
+    # Expose GQL errors if any
+    if data.get("errors"):
+        raise HTTPException(500, {"gql_errors": data["errors"]})
+
     out = []
     for edge in data.get("data", {}).get("deliveryProfiles", {}).get("edges", []):
         profile = edge["node"]
