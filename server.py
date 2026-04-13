@@ -275,7 +275,7 @@ async def sync_shopify_zones():
         "1.25": 5, "1.50": 6, "1.75": 7, "2.00": 8, "2.50": 9,
     }
 
-    # ── Step 1: fetch all delivery profiles + shop locations ─────────────────
+    # ── Step 1a: fetch all delivery profiles ─────────────────────────────────
     query = """
     {
       deliveryProfiles(first: 20) {
@@ -289,9 +289,6 @@ async def sync_shopify_zones():
           }
         }}
       }
-      locations(first: 20, includeLegacy: false) {
-        edges { node { id name active } }
-      }
     }
     """
     async with httpx.AsyncClient(timeout=30) as client:
@@ -304,10 +301,15 @@ async def sync_shopify_zones():
     ]
     oversized = [p for p in all_profiles if "oversized" in p["name"].lower()]
 
-    # Collect all active fulfillment location IDs (needed for empty LG fix)
+    # ── Step 1b: fetch shop fulfillment locations ─────────────────────────────
+    loc_query = """{ locations(first: 20) { edges { node { id name active } } } }"""
+    async with httpx.AsyncClient(timeout=30) as client:
+        rl   = await client.post(gql_url, headers=headers, json={"query": loc_query})
+        ld   = rl.json()
+
     location_ids = [
         e["node"]["id"]
-        for e in data.get("data", {}).get("locations", {}).get("edges", [])
+        for e in ld.get("data", {}).get("locations", {}).get("edges", [])
         if e["node"].get("active", True)
     ]
 
