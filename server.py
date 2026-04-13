@@ -275,14 +275,21 @@ async def sync_shopify_zones():
         "1.25": 5, "1.50": 6, "1.75": 7, "2.00": 8, "2.50": 9,
     }
 
-    # ── Step 1a: fetch all delivery profiles ─────────────────────────────────
+    # ── Step 1: fetch all delivery profiles + location IDs from each LG ─────
+    # NOTE: the 'locations' root query requires read_locations scope (not available
+    # with read_shipping/write_shipping). Instead, we query location IDs from within
+    # each location group — DeliveryLocationGroup.locations is accessible with
+    # shipping scope.
     query = """
     {
       deliveryProfiles(first: 20) {
         edges { node {
           id name
           profileLocationGroups {
-            locationGroup { id }
+            locationGroup {
+              id
+              locations(first: 20) { edges { node { id name } } }
+            }
             locationGroupZones(first: 30) {
               edges { node { zone { id name } } }
             }
@@ -301,17 +308,17 @@ async def sync_shopify_zones():
     ]
     oversized = [p for p in all_profiles if "oversized" in p["name"].lower()]
 
-    # ── Step 1b: fetch shop fulfillment locations ─────────────────────────────
-    loc_query = """{ locations(first: 20) { edges { node { id name active } } } }"""
-    async with httpx.AsyncClient(timeout=30) as client:
-        rl   = await client.post(gql_url, headers=headers, json={"query": loc_query})
-        ld   = rl.json()
-
-    location_ids = [
-        e["node"]["id"]
-        for e in ld.get("data", {}).get("locations", {}).get("edges", [])
-        if e["node"].get("active", True)
-    ]
+    # Extract location IDs from the first profile that has a non-empty LG
+    # (working profiles always have locations assigned to their LG)
+    location_ids = []
+    for p in all_profiles:
+        for lg_entry in p.get("profileLocationGroups", []):
+            locs = lg_entry.get("locationGroup", {}).get("locations", {}).get("edges", [])
+            if locs:
+                location_ids = [e["node"]["id"] for e in locs]
+                break
+        if location_ids:
+            break
 
     if not oversized:
         return {
@@ -386,7 +393,28 @@ async def sync_shopify_zones():
             # Empty location groups silently reject zone creation in Shopify.
             # Fix: delete the empty LG and create a new one that explicitly
             # assigns the store's fulfillment locations, then add all 8 zones.
-            all_zone_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx])
+            #
+            # NOTE: locationGroupsToCreate uses DeliveryLocationGroupZoneInput
+            # which is FLAT (no 'zone' wrapper), unlike DeliveryProfileZoneInput
+            # used by locationGroupsToUpdate which has a 'zone: {...}' wrapper.
+            def make_flat_zone_payload(zdef, rate):
+                return {
+                    "name": zdef["name"],
+                    "countries": [{
+                        "code": "NZ",
+                        "includeAllProvinces": False,
+                        "provinces": [{"code": p} for p in zdef["provinces"]]
+                    }],
+                    "methodDefinitionsToCreate": [{
+                        "name": "Oversized Freight",
+                        "active": True,
+                        "rateDefinition": {
+                            "price": {"amount": str(float(rate)), "currencyCode": "NZD"}
+                        }
+                    }]
+                }
+
+            all_zone_payloads = [make_flat_zone_payload(z, ZONE_RATES[z["name"]][tier_idx])
                                  for z in ZONE_DEFS]
             fresh_vars = {
                 "id": profile_id,
