@@ -275,7 +275,7 @@ async def sync_shopify_zones():
         "1.25": 5, "1.50": 6, "1.75": 7, "2.00": 8, "2.50": 9,
     }
 
-    # ── Step 1: fetch all delivery profiles ──────────────────────────────────
+    # ── Step 1: fetch all delivery profiles + shop locations ─────────────────
     query = """
     {
       deliveryProfiles(first: 20) {
@@ -289,6 +289,9 @@ async def sync_shopify_zones():
           }
         }}
       }
+      locations(first: 20, includeLegacy: false) {
+        edges { node { id name active } }
+      }
     }
     """
     async with httpx.AsyncClient(timeout=30) as client:
@@ -300,6 +303,13 @@ async def sync_shopify_zones():
         for e in data.get("data", {}).get("deliveryProfiles", {}).get("edges", [])
     ]
     oversized = [p for p in all_profiles if "oversized" in p["name"].lower()]
+
+    # Collect all active fulfillment location IDs (needed for empty LG fix)
+    location_ids = [
+        e["node"]["id"]
+        for e in data.get("data", {}).get("locations", {}).get("edges", [])
+        if e["node"].get("active", True)
+    ]
 
     if not oversized:
         return {
@@ -369,49 +379,99 @@ async def sync_shopify_zones():
         si_zone_def = next(z for z in ZONE_DEFS if z["name"] == "South Island")
         non_si_defs = [z for z in ZONE_DEFS if z["name"] != "South Island"]
 
-        # ── Step 1: delete all existing zones + create only the non-SI zones ──
-        non_si_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx]) for z in non_si_defs]
-        variables = {
-            "id": profile_id,
-            "profile": {
-                "locationGroupsToUpdate": [{
-                    "id": lg_id,
-                    "zonesToCreate": non_si_payloads,
-                    "zonesToDelete": existing_zone_ids
-                }]
+        if not existing_zone_ids:
+            # ── Fresh profile (no existing zones): rebuild LG with locations ──
+            # Empty location groups silently reject zone creation in Shopify.
+            # Fix: delete the empty LG and create a new one that explicitly
+            # assigns the store's fulfillment locations, then add all 8 zones.
+            all_zone_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx])
+                                 for z in ZONE_DEFS]
+            fresh_vars = {
+                "id": profile_id,
+                "profile": {
+                    "locationGroupsToDelete": [lg_id],
+                    "locationGroupsToCreate": [{
+                        "locations": {"locationsToAdd": location_ids},
+                        "zonesToCreate": all_zone_payloads
+                    }]
+                }
             }
-        }
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(gql_url, headers=headers,
-                                  json={"query": mutation, "variables": variables})
-            r1 = r.json()
-
-        errs = (r1.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-        if errs:
-            results.append({"profile": profile_name, "success": False,
-                            "tier_index": tier_idx, "errors": errs})
-            continue
-
-        # ── Step 2: create South Island zone in its own isolated mutation ─────
-        si_vars = {
-            "id": profile_id,
-            "profile": {
-                "locationGroupsToUpdate": [{
-                    "id": lg_id,
-                    "zonesToCreate": [make_zone_payload(si_zone_def, si_rate)]
-                }]
+            # Use a mutation variant that returns the new LG id
+            fresh_mutation = """
+            mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
+              deliveryProfileUpdate(id: $id, profile: $profile) {
+                profile {
+                  profileLocationGroups {
+                    locationGroup { id }
+                  }
+                }
+                userErrors { field message }
+              }
             }
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            rs = await client.post(gql_url, headers=headers,
-                                   json={"query": mutation, "variables": si_vars})
-            sd = rs.json()
+            """
+            async with httpx.AsyncClient(timeout=60) as client:
+                rf = await client.post(gql_url, headers=headers,
+                                       json={"query": fresh_mutation, "variables": fresh_vars})
+                fd = rf.json()
 
-        si_create_errors = (sd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-        if si_create_errors:
-            results.append({"profile": profile_name, "success": False,
-                            "tier_index": tier_idx, "errors": si_create_errors})
-            continue
+            fresh_errs = (fd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+            if fresh_errs:
+                results.append({"profile": profile_name, "success": False,
+                                "tier_index": tier_idx,
+                                "step": "fresh_lg_create", "errors": fresh_errs})
+                continue
+
+            # Update lg_id to the newly created location group
+            new_lgs = ((fd.get("data", {}).get("deliveryProfileUpdate") or {})
+                       .get("profile", {}).get("profileLocationGroups", []))
+            if new_lgs:
+                lg_id = new_lgs[0]["locationGroup"]["id"]
+
+        else:
+            # ── Existing profile: delete all zones, create 7 non-SI zones ────
+            non_si_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx])
+                               for z in non_si_defs]
+            variables = {
+                "id": profile_id,
+                "profile": {
+                    "locationGroupsToUpdate": [{
+                        "id": lg_id,
+                        "zonesToCreate": non_si_payloads,
+                        "zonesToDelete": existing_zone_ids
+                    }]
+                }
+            }
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(gql_url, headers=headers,
+                                      json={"query": mutation, "variables": variables})
+                r1 = r.json()
+
+            errs = (r1.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+            if errs:
+                results.append({"profile": profile_name, "success": False,
+                                "tier_index": tier_idx, "errors": errs})
+                continue
+
+            # ── Step 2: create South Island zone in its own isolated mutation ──
+            si_vars = {
+                "id": profile_id,
+                "profile": {
+                    "locationGroupsToUpdate": [{
+                        "id": lg_id,
+                        "zonesToCreate": [make_zone_payload(si_zone_def, si_rate)]
+                    }]
+                }
+            }
+            async with httpx.AsyncClient(timeout=30) as client:
+                rs = await client.post(gql_url, headers=headers,
+                                       json={"query": mutation, "variables": si_vars})
+                sd = rs.json()
+
+            si_create_errors = (sd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+            if si_create_errors:
+                results.append({"profile": profile_name, "success": False,
+                                "tier_index": tier_idx, "errors": si_create_errors})
+                continue
 
         # ── Step 3: fix SI rate via method def delete + recreate ─────────────
         # Shopify persists a "remembered" $55 rate for this province set regardless
