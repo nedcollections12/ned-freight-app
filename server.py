@@ -309,9 +309,8 @@ async def sync_shopify_zones():
     # The active NZ shipping location is "Click & Collect | Showroom" (ID 60827664571).
     # Including all 4 store locations so the LG mirrors the working profiles' setup.
     location_ids = [
-        "gid://shopify/Location/60827664571",  # Click & Collect | Showroom (Active)
+        "gid://shopify/Location/60827664571",  # Click & Collect | Showroom (Active, fulfills online)
         "gid://shopify/Location/75356766395",  # Click & Collect | Warehouse
-        "gid://shopify/Location/70150357179",  # Home & Garden
     ]
 
     if not oversized:
