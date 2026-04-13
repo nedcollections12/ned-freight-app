@@ -319,15 +319,6 @@ async def sync_shopify_zones():
             "profiles_found": [p["name"] for p in all_profiles]
         }
 
-    mutation = """
-    mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
-      deliveryProfileUpdate(id: $id, profile: $profile) {
-        profile { id name }
-        userErrors { field message }
-      }
-    }
-    """
-
     results = []
 
     for profile in oversized:
@@ -358,273 +349,73 @@ async def sync_shopify_zones():
                             "reason": "No CBM tier found in name — manual setup required"})
             continue
 
-        def make_zone_payload(zdef, rate):
-            return {
-                "zone": {
-                    "name": zdef["name"],
-                    "countries": [{
-                        "code": "NZ",
-                        "includeAllProvinces": False,
-                        "provinces": [{"code": p} for p in zdef["provinces"]]
-                    }]
-                },
+        # ── Rebuild location group from scratch ───────────────────────────────
+        # Using locationGroupsToCreate (not Update) for ALL profiles because:
+        # - locationGroupsToUpdate on SI zone always gets Shopify's "geographic
+        #   entity cached" rate ($55) overriding whatever rate we specify
+        # - locationGroupsToCreate in a fresh LG bypasses this cache entirely
+        # - DeliveryLocationGroupZoneInput (used here) is FLAT — no 'zone' wrapper
+        all_zone_payloads = [
+            {
+                "name": z["name"],
+                "countries": [{
+                    "code": "NZ",
+                    "includeAllProvinces": False,
+                    "provinces": [{"code": p} for p in z["provinces"]]
+                }],
                 "methodDefinitionsToCreate": [{
                     "name": "Oversized Freight",
                     "active": True,
                     "rateDefinition": {
-                        "price": {"amount": str(float(rate)), "currencyCode": "NZD"}
+                        "price": {"amount": str(float(ZONE_RATES[z["name"]][tier_idx])),
+                                  "currencyCode": "NZD"}
                     }
                 }]
             }
+            for z in ZONE_DEFS
+        ]
 
-        si_rate     = ZONE_RATES["South Island"][tier_idx]
-        si_zone_def = next(z for z in ZONE_DEFS if z["name"] == "South Island")
-        non_si_defs = [z for z in ZONE_DEFS if z["name"] != "South Island"]
-
-        if not existing_zone_ids:
-            # ── Fresh profile (no existing zones): rebuild LG with locations ──
-            # Empty location groups silently reject zone creation in Shopify.
-            # Fix: delete the empty LG and create a new one that explicitly
-            # assigns the store's fulfillment locations, then add all 8 zones.
-            #
-            # NOTE: locationGroupsToCreate uses DeliveryLocationGroupZoneInput
-            # which is FLAT (no 'zone' wrapper), unlike DeliveryProfileZoneInput
-            # used by locationGroupsToUpdate which has a 'zone: {...}' wrapper.
-            def make_flat_zone_payload(zdef, rate):
-                return {
-                    "name": zdef["name"],
-                    "countries": [{
-                        "code": "NZ",
-                        "includeAllProvinces": False,
-                        "provinces": [{"code": p} for p in zdef["provinces"]]
-                    }],
-                    "methodDefinitionsToCreate": [{
-                        "name": "Oversized Freight",
-                        "active": True,
-                        "rateDefinition": {
-                            "price": {"amount": str(float(rate)), "currencyCode": "NZD"}
-                        }
-                    }]
-                }
-
-            all_zone_payloads = [make_flat_zone_payload(z, ZONE_RATES[z["name"]][tier_idx])
-                                 for z in ZONE_DEFS]
-            fresh_vars = {
-                "id": profile_id,
-                "profile": {
-                    "locationGroupsToDelete": [lg_id],
-                    "locationGroupsToCreate": [{
-                        "locations": location_ids,
-                        "zonesToCreate": all_zone_payloads
-                    }]
-                }
+        rebuild_vars = {
+            "id": profile_id,
+            "profile": {
+                "locationGroupsToDelete": [lg_id],
+                "locationGroupsToCreate": [{
+                    "locations":     location_ids,
+                    "zonesToCreate": all_zone_payloads
+                }]
             }
-            # Use a mutation variant that returns the new LG id
-            fresh_mutation = """
-            mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
-              deliveryProfileUpdate(id: $id, profile: $profile) {
-                profile {
-                  profileLocationGroups {
-                    locationGroup { id }
-                  }
-                }
-                userErrors { field message }
-              }
-            }
-            """
-            async with httpx.AsyncClient(timeout=60) as client:
-                rf = await client.post(gql_url, headers=headers,
-                                       json={"query": fresh_mutation, "variables": fresh_vars})
-                fd = rf.json()
-
-            fresh_errs = (fd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-            if fresh_errs:
-                results.append({"profile": profile_name, "success": False,
-                                "tier_index": tier_idx, "location_ids_used": location_ids,
-                                "step": "fresh_lg_create", "errors": fresh_errs,
-                                "raw_response": fd})
-                continue
-
-            # Update lg_id to the newly created location group
-            new_lgs = ((fd.get("data", {}).get("deliveryProfileUpdate") or {})
-                       .get("profile", {}).get("profileLocationGroups", []))
-            if new_lgs:
-                lg_id = new_lgs[0]["locationGroup"]["id"]
-            else:
-                # Dump raw response for debugging — LG creation may have failed silently
-                results.append({"profile": profile_name, "success": False,
-                                "tier_index": tier_idx, "location_ids_used": location_ids,
-                                "step": "fresh_lg_create_no_new_lg",
-                                "raw_response": fd, "errors": ["No new LG returned"]})
-                continue
-
-        else:
-            # ── Existing profile: delete all zones, create 7 non-SI zones ────
-            non_si_payloads = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx])
-                               for z in non_si_defs]
-            variables = {
-                "id": profile_id,
-                "profile": {
-                    "locationGroupsToUpdate": [{
-                        "id": lg_id,
-                        "zonesToCreate": non_si_payloads,
-                        "zonesToDelete": existing_zone_ids
-                    }]
-                }
-            }
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(gql_url, headers=headers,
-                                      json={"query": mutation, "variables": variables})
-                r1 = r.json()
-
-            errs = (r1.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-            if errs:
-                results.append({"profile": profile_name, "success": False,
-                                "tier_index": tier_idx, "errors": errs})
-                continue
-
-            # ── Step 2: create South Island zone in its own isolated mutation ──
-            si_vars = {
-                "id": profile_id,
-                "profile": {
-                    "locationGroupsToUpdate": [{
-                        "id": lg_id,
-                        "zonesToCreate": [make_zone_payload(si_zone_def, si_rate)]
-                    }]
-                }
-            }
-            async with httpx.AsyncClient(timeout=30) as client:
-                rs = await client.post(gql_url, headers=headers,
-                                       json={"query": mutation, "variables": si_vars})
-                sd = rs.json()
-
-            si_create_errors = (sd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
-            if si_create_errors:
-                results.append({"profile": profile_name, "success": False,
-                                "tier_index": tier_idx, "errors": si_create_errors})
-                continue
-
-        # ── Step 3: fix SI rate via method def delete + recreate ─────────────
-        # Shopify persists a "remembered" $55 rate for this province set regardless
-        # of what rate we specify in zonesToCreate. Fix: query the created zone,
-        # delete the wrong method definition, create a new one at the correct rate.
-        profile_q = """
-        query($id: ID!) {
-          deliveryProfile(id: $id) {
-            profileLocationGroups {
-              locationGroupZones(first: 30) {
-                edges { node {
-                  zone { id name }
-                  methodDefinitions(first: 5) {
-                    edges { node {
-                      id
-                      rateProvider {
-                        ... on DeliveryRateDefinition { price { amount } }
-                      }
-                    }}
-                  }
-                }}
-              }
-            }
+        }
+        rebuild_mutation = """
+        mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
+          deliveryProfileUpdate(id: $id, profile: $profile) {
+            profile { profileLocationGroups { locationGroup { id } } }
+            userErrors { field message }
           }
         }
         """
-        async with httpx.AsyncClient(timeout=30) as client:
-            rq = await client.post(gql_url, headers=headers,
-                                   json={"query": profile_q, "variables": {"id": profile_id}})
-            qd = rq.json()
+        async with httpx.AsyncClient(timeout=60) as client:
+            rb = await client.post(gql_url, headers=headers,
+                                   json={"query": rebuild_mutation, "variables": rebuild_vars})
+            rd = rb.json()
 
-        # Find SI zone + method def
-        si_zone_id     = None
-        si_md_id       = None
-        si_stored_rate = None
-        for lg_data in (qd.get("data", {}).get("deliveryProfile") or {}).get("profileLocationGroups", []):
-            for ze in lg_data.get("locationGroupZones", {}).get("edges", []):
-                zn = ze["node"]
-                if (zn.get("zone") or {}).get("name") == "South Island":
-                    si_zone_id = zn["zone"]["id"]
-                    mds = zn.get("methodDefinitions", {}).get("edges", [])
-                    if mds:
-                        md = mds[0]["node"]
-                        si_md_id       = md["id"]
-                        si_stored_rate = (md.get("rateProvider") or {}).get("price", {}).get("amount")
-                    break
-            if si_zone_id:
-                break
+        errs = (rd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+        if errs:
+            results.append({"profile": profile_name, "success": False,
+                            "tier_index": tier_idx, "errors": errs})
+            continue
 
-        rate_fix_info = {
-            "si_zone_id": si_zone_id,
-            "si_md_id":   si_md_id,
-            "si_stored_rate_before": si_stored_rate,
-        }
-
-        rate_fixed = False
-        rate_fix_errors = []
-        expected_rate_str = str(float(si_rate))  # e.g. "65.0"
-
-        if si_md_id and str(si_stored_rate) != expected_rate_str:
-            # Delete the wrong method definition
-            del_q = """
-            mutation($id: ID!) {
-              deliveryMethodDefinitionDelete(id: $id) {
-                deletedMethodDefinitionId
-                userErrors { field message }
-              }
-            }
-            """
-            async with httpx.AsyncClient(timeout=30) as client:
-                rd = await client.post(gql_url, headers=headers,
-                                       json={"query": del_q, "variables": {"id": si_md_id}})
-                dd = rd.json()
-            del_errs = (dd.get("data") or {}).get("deliveryMethodDefinitionDelete", {}).get("userErrors", [])
-            rate_fix_info["delete_errors"] = del_errs
-
-            if not del_errs and si_zone_id:
-                # Create new method def at correct rate
-                create_q = """
-                mutation($profileId: ID!, $zoneId: ID!, $md: DeliveryMethodDefinitionInput!) {
-                  deliveryMethodDefinitionCreate(profileId: $profileId, zoneId: $zoneId, methodDefinition: $md) {
-                    methodDefinition { id name }
-                    userErrors { field message }
-                  }
-                }
-                """
-                create_vars = {
-                    "profileId": profile_id,
-                    "zoneId":    si_zone_id,
-                    "md": {
-                        "name":   "Oversized Freight",
-                        "active": True,
-                        "rateDefinition": {
-                            "price": {"amount": str(float(si_rate)), "currencyCode": "NZD"}
-                        }
-                    }
-                }
-                async with httpx.AsyncClient(timeout=30) as client:
-                    rc = await client.post(gql_url, headers=headers,
-                                           json={"query": create_q, "variables": create_vars})
-                    cd = rc.json()
-                create_errs = (cd.get("data") or {}).get("deliveryMethodDefinitionCreate", {}).get("userErrors", [])
-                rate_fix_info["create_errors"] = create_errs
-                rate_fixed   = len(create_errs) == 0
-                rate_fix_errors = create_errs
-            else:
-                rate_fix_errors = del_errs
-        elif si_md_id:
-            rate_fixed = True  # rate was already correct
+        new_lgs = ((rd.get("data", {}).get("deliveryProfileUpdate") or {})
+                   .get("profile", {}).get("profileLocationGroups", []))
+        new_lg_id = new_lgs[0]["locationGroup"]["id"] if new_lgs else None
 
         results.append({
-            "profile":        profile_name,
-            "success":        rate_fixed or (si_md_id is None),
-            "tier_index":     tier_idx,
-            "si_rate_target": si_rate,
-            "si_rate_before": si_stored_rate,
-            "rate_fixed":     rate_fixed,
-            "zones_created":  len(ZONE_DEFS),
-            "zones_deleted":  len(existing_zone_ids),
-            "lg_id":          lg_id,
-            "rate_fix_info":  rate_fix_info,
-            "errors":         rate_fix_errors,
+            "profile":       profile_name,
+            "success":       True,
+            "tier_index":    tier_idx,
+            "zones_created": len(ZONE_DEFS),
+            "zones_deleted": len(existing_zone_ids),
+            "new_lg_id":     new_lg_id,
+            "errors":        [],
         })
 
     return {"results": results, "profiles_processed": len(oversized)}
