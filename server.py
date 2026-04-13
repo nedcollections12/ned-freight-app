@@ -419,23 +419,39 @@ async def sync_shopify_zones():
 
 @app.get("/api/raw-profile")
 async def raw_profile():
-    """Return raw REST API data for the first Oversized profile (for debugging)."""
+    """Diagnostic: raw GraphQL deliveryProfiles response + REST shipping zones."""
     if not TOKEN_FILE.exists():
         raise HTTPException(400, "No token.")
     token_data = json.loads(TOKEN_FILE.read_text())
     token, shop = token_data["token"], token_data["shop"]
-    headers = {"X-Shopify-Access-Token": token}
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    gql_url = f"https://{shop}/admin/api/2024-04/graphql.json"
+
     async with httpx.AsyncClient(timeout=30) as client:
-        # List profiles
-        r = await client.get(f"https://{shop}/admin/api/2024-04/delivery_profiles.json", headers=headers)
-        profiles = r.json().get("delivery_profiles", [])
-        oversized = [p for p in profiles if "oversized" in p.get("name", "").lower()]
-        if not oversized:
-            return {"error": "no oversized profiles found", "all_profiles": [p["name"] for p in profiles]}
-        # Fetch first oversized profile in full
-        pid = oversized[0]["id"]
-        r2 = await client.get(f"https://{shop}/admin/api/2024-04/delivery_profiles/{pid}.json", headers=headers)
-        return r2.json()
+        # 1. GraphQL deliveryProfiles
+        gql_q = """{ deliveryProfiles(first: 20) { edges { node { id name } } } }"""
+        r1 = await client.post(gql_url, headers=headers, json={"query": gql_q})
+        gql_result = r1.json()
+
+        # 2. REST delivery_profiles
+        r2 = await client.get(
+            f"https://{shop}/admin/api/2024-04/delivery_profiles.json",
+            headers={"X-Shopify-Access-Token": token}
+        )
+        rest_result = r2.json()
+
+        # 3. REST shipping_zones (older API)
+        r3 = await client.get(
+            f"https://{shop}/admin/api/2024-04/shipping_zones.json",
+            headers={"X-Shopify-Access-Token": token}
+        )
+        shipping_zones = r3.json()
+
+    return {
+        "gql_delivery_profiles": gql_result,
+        "rest_delivery_profiles": rest_result,
+        "rest_shipping_zones_names": [z.get("name") for z in shipping_zones.get("shipping_zones", [])]
+    }
 
 
 @app.get("/api/check-zones")
