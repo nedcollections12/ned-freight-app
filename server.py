@@ -419,8 +419,9 @@ async def sync_shopify_zones():
             fresh_errs = (fd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
             if fresh_errs:
                 results.append({"profile": profile_name, "success": False,
-                                "tier_index": tier_idx,
-                                "step": "fresh_lg_create", "errors": fresh_errs})
+                                "tier_index": tier_idx, "location_ids_used": location_ids,
+                                "step": "fresh_lg_create", "errors": fresh_errs,
+                                "raw_response": fd})
                 continue
 
             # Update lg_id to the newly created location group
@@ -428,6 +429,13 @@ async def sync_shopify_zones():
                        .get("profile", {}).get("profileLocationGroups", []))
             if new_lgs:
                 lg_id = new_lgs[0]["locationGroup"]["id"]
+            else:
+                # Dump raw response for debugging — LG creation may have failed silently
+                results.append({"profile": profile_name, "success": False,
+                                "tier_index": tier_idx, "location_ids_used": location_ids,
+                                "step": "fresh_lg_create_no_new_lg",
+                                "raw_response": fd, "errors": ["No new LG returned"]})
+                continue
 
         else:
             # ── Existing profile: delete all zones, create 7 non-SI zones ────
