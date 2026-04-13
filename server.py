@@ -456,7 +456,6 @@ async def check_zones():
                 zone {
                   id name
                   countries {
-                    code { ... on CountryCode { countryCode } }
                     provinces { code }
                   }
                 }
