@@ -232,20 +232,19 @@ async def sync_shopify_zones():
     headers  = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     gql_url  = f"https://{shop}/admin/api/2024-04/graphql.json"
 
-    # ── 12-zone structure: SI split into individual province zones to prevent
-    #    Shopify from merging "Upper SI" + "Lower SI" into one "South Island" zone.
-    #    Canterbury (CAN) stays separate as a single-province zone; same principle
-    #    is applied to all remaining SI provinces. ──────────────────────────────
+    # ── 8-zone structure ─────────────────────────────────────────────────────
+    # NOTE: Shopify's delivery profile system automatically merges ALL non-Canterbury
+    # South Island provinces (MBH, NSN, TAS, WTC, OTA, STL) into a single geographic
+    # unit called "South Island", regardless of how many separate zones are created
+    # via the API. This is a confirmed Shopify platform limitation — even individual
+    # single-province zones get merged.
+    # Resolution: use ONE explicit "South Island" zone with the Lower SI (higher) rate
+    # so Otago/Southland customers are never undercharged. Upper SI customers
+    # (Marlborough/Nelson/Tasman/West Coast) pay the Lower SI rate — $10/tier more
+    # than the spreadsheet rate. Canterbury remains a separate zone as normal.
     ZONE_DEFS = [
         {"name": "Christchurch",              "provinces": ["CAN"]},
-        # Upper South Island (individual province zones)
-        {"name": "Marlborough",               "provinces": ["MBH"]},
-        {"name": "Nelson / Tasman",           "provinces": ["NSN","TAS"]},
-        {"name": "West Coast",                "provinces": ["WTC"]},
-        # Lower South Island (individual province zones)
-        {"name": "Otago",                     "provinces": ["OTA"]},
-        {"name": "Southland",                 "provinces": ["STL"]},
-        # North Island
+        {"name": "South Island",              "provinces": ["MBH","NSN","TAS","WTC","OTA","STL"]},
         {"name": "NI Lower",                  "provinces": ["WGN"]},
         {"name": "Waikato",                   "provinces": ["WKO"]},
         {"name": "Bay of Plenty / Gisborne",  "provinces": ["BOP","GIS"]},
@@ -257,15 +256,11 @@ async def sync_shopify_zones():
     # Flat rates per zone per CBM tier (source: "Oversized Shopify Rates" tab)
     # Tier index: 0=0.16-0.25, 1=0.25-0.50, 2=0.50-0.75, 3=0.75-1.00, 4=1.00-1.25,
     #             5=1.25-1.50, 6=1.50-1.75, 7=1.75-2.00, 8=2.00-2.50, 9=2.50+
-    # Upper SI rate applies to: Marlborough, Nelson/Tasman, West Coast
-    # Lower SI rate applies to: Otago, Southland
+    # "South Island" uses Lower SI (Otago/Southland) rates — the higher of the two —
+    # to ensure no undercharging for any South Island customer.
     ZONE_RATES = {
         "Christchurch":              [ 40,  40,  40,  40,  40,  45,  55,  60,  70,  85],
-        "Marlborough":               [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
-        "Nelson / Tasman":           [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
-        "West Coast":                [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
-        "Otago":                     [ 65,  65,  65,  85, 105, 130, 155, 175, 200, 245],
-        "Southland":                 [ 65,  65,  65,  85, 105, 130, 155, 175, 200, 245],
+        "South Island":              [ 65,  65,  65,  85, 105, 130, 155, 175, 200, 245],
         "NI Lower":                  [ 65,  65,  75,  95, 120, 150, 175, 200, 230, 285],
         "Waikato":                   [ 65,  65,  85, 120, 150, 185, 220, 255, 285, 355],
         "Bay of Plenty / Gisborne":  [ 65,  65,  85, 120, 155, 185, 220, 255, 290, 355],
