@@ -456,46 +456,77 @@ async def raw_profile():
 
 @app.get("/api/check-zones")
 async def check_zones():
-    """Return zone names, province codes, and rates for every Oversized profile (REST API)."""
+    """Return zone names, province codes, and rates for every Oversized profile (GraphQL)."""
     if not TOKEN_FILE.exists():
         raise HTTPException(400, "No token.")
     token_data = json.loads(TOKEN_FILE.read_text())
     token, shop = token_data["token"], token_data["shop"]
-    headers = {"X-Shopify-Access-Token": token}
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    gql_url = f"https://{shop}/admin/api/2024-04/graphql.json"
 
+    query = """
+    {
+      deliveryProfiles(first: 20) {
+        edges { node {
+          id name
+          profileLocationGroups {
+            locationGroupZones(first: 30) {
+              edges { node {
+                zone {
+                  id name
+                  countries {
+                    code
+                    provinces { code }
+                  }
+                }
+                methodDefinitions(first: 10) {
+                  edges { node {
+                    name
+                    rateProvider {
+                      ... on DeliveryRateDefinition {
+                        price { amount }
+                      }
+                    }
+                  }}
+                }
+              }}
+            }
+          }
+        }}
+      }
+    }
+    """
     async with httpx.AsyncClient(timeout=60) as client:
-        # Step 1: list all profiles
-        r = await client.get(f"https://{shop}/admin/api/2024-04/delivery_profiles.json", headers=headers)
-        profiles = r.json().get("delivery_profiles", [])
-        oversized = [p for p in profiles if "oversized" in p.get("name", "").lower()]
+        r = await client.post(gql_url, headers=headers, json={"query": query})
+        data = r.json()
 
-        out = []
-        for p in oversized:
-            # Step 2: fetch full profile to get zone data
-            r2 = await client.get(
-                f"https://{shop}/admin/api/2024-04/delivery_profiles/{p['id']}.json",
-                headers=headers
-            )
-            profile = r2.json().get("delivery_profile", {})
-            zones_out = []
-            for lg in profile.get("profile_location_groups", []):
-                for zone in lg.get("location_group_zones", []):
-                    z = zone.get("zone", {})
-                    provinces = []
-                    for c in z.get("countries", []):
-                        for prov in c.get("provinces", []):
-                            provinces.append(prov.get("code", ""))
-                    methods = [
-                        {"name": m.get("name"), "price": m.get("price", {}).get("amount")}
-                        for m in zone.get("method_definitions", [])
-                    ]
-                    zones_out.append({
-                        "zone_id":   z.get("id"),
-                        "zone_name": z.get("name"),
-                        "provinces": sorted(provinces),
-                        "rates":     methods
-                    })
-            out.append({"profile": profile.get("name", p["name"]), "zone_count": len(zones_out), "zones": zones_out})
+    out = []
+    for edge in data.get("data", {}).get("deliveryProfiles", {}).get("edges", []):
+        profile = edge["node"]
+        if "oversized" not in profile["name"].lower():
+            continue
+        zones_out = []
+        for lg in profile.get("profileLocationGroups", []):
+            for ze in lg.get("locationGroupZones", {}).get("edges", []):
+                znode = ze["node"]
+                z = znode.get("zone", {})
+                provinces = [
+                    prov["code"]
+                    for c in z.get("countries", [])
+                    for prov in c.get("provinces", [])
+                ]
+                rates = []
+                for me in znode.get("methodDefinitions", {}).get("edges", []):
+                    m = me["node"]
+                    price = (m.get("rateProvider") or {}).get("price", {}).get("amount")
+                    rates.append({"name": m["name"], "price": price})
+                zones_out.append({
+                    "zone_id":   z.get("id"),
+                    "zone_name": z.get("name"),
+                    "provinces": sorted(provinces),
+                    "rates":     rates
+                })
+        out.append({"profile": profile["name"], "zone_count": len(zones_out), "zones": zones_out})
     return out
 
 
