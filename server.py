@@ -302,9 +302,13 @@ async def sync_shopify_zones():
         r    = await client.post(gql_url, headers=headers, json={"query": query})
         data = r.json()
 
+    # Expose GQL errors to help diagnose scope/field issues
+    if data.get("errors") and not data.get("data"):
+        return {"error": "GraphQL query failed", "gql_errors": data["errors"]}
+
     all_profiles = [
         e["node"]
-        for e in data.get("data", {}).get("deliveryProfiles", {}).get("edges", [])
+        for e in (data.get("data") or {}).get("deliveryProfiles", {}).get("edges", [])
     ]
     oversized = [p for p in all_profiles if "oversized" in p["name"].lower()]
 
@@ -313,7 +317,7 @@ async def sync_shopify_zones():
     location_ids = []
     for p in all_profiles:
         for lg_entry in p.get("profileLocationGroups", []):
-            locs = lg_entry.get("locationGroup", {}).get("locations", {}).get("edges", [])
+            locs = (lg_entry.get("locationGroup") or {}).get("locations", {}).get("edges", [])
             if locs:
                 location_ids = [e["node"]["id"] for e in locs]
                 break
