@@ -337,11 +337,8 @@ async def sync_shopify_zones():
                             "reason": "No CBM tier found in name — manual setup required"})
             continue
 
-        # Build zone payloads with per-profile flat rates
-        zones_to_create = []
-        for zdef in ZONE_DEFS:
-            rate = ZONE_RATES[zdef["name"]][tier_idx]
-            zones_to_create.append({
+        def make_zone_payload(zdef, rate):
+            return {
                 "zone": {
                     "name": zdef["name"],
                     "countries": [{
@@ -357,32 +354,64 @@ async def sync_shopify_zones():
                         "price": {"amount": str(float(rate)), "currencyCode": "NZD"}
                     }
                 }]
-            })
+            }
 
+        # Split: 7 non-SI zones go in call 1 (with deletions); Upper SI and Lower SI
+        # each get their own call so Shopify cannot merge them into one "South Island" zone.
+        si_zones  = [z for z in ZONE_DEFS if "south island" in z["name"].lower()]
+        base_zones = [z for z in ZONE_DEFS if "south island" not in z["name"].lower()]
+
+        # ── Call 1: delete existing + create 7 non-SI zones ──────────────────
+        call1_payload = [make_zone_payload(z, ZONE_RATES[z["name"]][tier_idx]) for z in base_zones]
         variables = {
             "id": profile_id,
             "profile": {
                 "locationGroupsToUpdate": [{
                     "id": lg_id,
-                    "zonesToCreate": zones_to_create,
+                    "zonesToCreate": call1_payload,
                     "zonesToDelete": existing_zone_ids
                 }]
             }
         }
-
         async with httpx.AsyncClient(timeout=30) as client:
-            r      = await client.post(gql_url, headers=headers,
-                                       json={"query": mutation, "variables": variables})
-            result = r.json()
+            r = await client.post(gql_url, headers=headers,
+                                  json={"query": mutation, "variables": variables})
+            r1 = r.json()
 
-        errs = (result.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+        errs = (r1.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+        if errs:
+            results.append({"profile": profile_name, "success": False,
+                            "tier_index": tier_idx, "errors": errs})
+            continue
+
+        # ── Calls 2 & 3: add each SI zone separately ─────────────────────────
+        si_errors = []
+        for zdef in si_zones:
+            rate = ZONE_RATES[zdef["name"]][tier_idx]
+            variables = {
+                "id": profile_id,
+                "profile": {
+                    "locationGroupsToUpdate": [{
+                        "id": lg_id,
+                        "zonesToCreate": [make_zone_payload(zdef, rate)]
+                    }]
+                }
+            }
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(gql_url, headers=headers,
+                                      json={"query": mutation, "variables": variables})
+                rd = r.json()
+            si_errs = (rd.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+            si_errors.extend(si_errs)
+
+        all_errors = errs + si_errors
         results.append({
             "profile":       profile_name,
-            "success":       len(errs) == 0,
+            "success":       len(all_errors) == 0,
             "tier_index":    tier_idx,
-            "zones_created": len(zones_to_create),
+            "zones_created": len(base_zones) + len(si_zones),
             "zones_deleted": len(existing_zone_ids),
-            "errors":        errs,
+            "errors":        all_errors,
         })
 
     return {"results": results, "profiles_processed": len(oversized)}
