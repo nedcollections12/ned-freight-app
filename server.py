@@ -275,21 +275,14 @@ async def sync_shopify_zones():
         "1.25": 5, "1.50": 6, "1.75": 7, "2.00": 8, "2.50": 9,
     }
 
-    # ── Step 1: fetch all delivery profiles + location IDs from each LG ─────
-    # NOTE: the 'locations' root query requires read_locations scope (not available
-    # with read_shipping/write_shipping). Instead, we query location IDs from within
-    # each location group — DeliveryLocationGroup.locations is accessible with
-    # shipping scope.
+    # ── Step 1: fetch all delivery profiles ──────────────────────────────────
     query = """
     {
       deliveryProfiles(first: 20) {
         edges { node {
           id name
           profileLocationGroups {
-            locationGroup {
-              id
-              locations(first: 20) { edges { node { id name } } }
-            }
+            locationGroup { id }
             locationGroupZones(first: 30) {
               edges { node { zone { id name } } }
             }
@@ -302,7 +295,6 @@ async def sync_shopify_zones():
         r    = await client.post(gql_url, headers=headers, json={"query": query})
         data = r.json()
 
-    # Expose GQL errors to help diagnose scope/field issues
     if data.get("errors") and not data.get("data"):
         return {"error": "GraphQL query failed", "gql_errors": data["errors"]}
 
@@ -312,17 +304,15 @@ async def sync_shopify_zones():
     ]
     oversized = [p for p in all_profiles if "oversized" in p["name"].lower()]
 
-    # Extract location IDs from the first profile that has a non-empty LG
-    # (working profiles always have locations assigned to their LG)
-    location_ids = []
-    for p in all_profiles:
-        for lg_entry in p.get("profileLocationGroups", []):
-            locs = (lg_entry.get("locationGroup") or {}).get("locations", {}).get("edges", [])
-            if locs:
-                location_ids = [e["node"]["id"] for e in locs]
-                break
-        if location_ids:
-            break
+    # Fulfillment location IDs for this store (from Shopify admin → Settings → Locations).
+    # Used when rebuilding empty location groups on profiles that have never had zones.
+    # The active NZ shipping location is "Click & Collect | Showroom" (ID 60827664571).
+    # Including all 4 store locations so the LG mirrors the working profiles' setup.
+    location_ids = [
+        "gid://shopify/Location/60827664571",  # Click & Collect | Showroom (Active)
+        "gid://shopify/Location/75356766395",  # Click & Collect | Warehouse
+        "gid://shopify/Location/70150357179",  # Home & Garden
+    ]
 
     if not oversized:
         return {
