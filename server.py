@@ -221,18 +221,50 @@ async def shopify_callback(code: str, shop: str, request: Request):
 
 @app.post("/api/sync-shopify-zones")
 async def sync_shopify_zones():
-    """Push oversized freight zones to Shopify as flat rates by NZ region."""
+    """Push 9 oversized freight zones + correct flat rates to Shopify (spreadsheet pricing)."""
     if not TOKEN_FILE.exists():
         raise HTTPException(400, "No Shopify token found. Please reinstall the app first.")
 
     token_data = json.loads(TOKEN_FILE.read_text())
     token = token_data["token"]
     shop  = token_data["shop"]
-    rates_data = load_rates()
-    oz_rates = rates_data["oversized"]["rates"]
 
     headers  = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     gql_url  = f"https://{shop}/admin/api/2024-04/graphql.json"
+
+    # ── 9-zone structure + province codes (source: NED_Collections_Oversized_Shipping_Profiles.xlsx) ──
+    ZONE_DEFS = [
+        {"name": "Christchurch",              "provinces": ["CAN"]},
+        {"name": "Upper South Island",        "provinces": ["MBH","WTC","NSN","TAS"]},
+        {"name": "Lower South Island",        "provinces": ["OTA","STL"]},
+        {"name": "NI Lower",                  "provinces": ["WGN"]},
+        {"name": "Waikato",                   "provinces": ["WKO"]},
+        {"name": "Bay of Plenty / Gisborne",  "provinces": ["BOP","GIS"]},
+        {"name": "Taranaki / Wan / HB",       "provinces": ["TKI","MWT","HKB"]},
+        {"name": "Auckland",                  "provinces": ["AUK"]},
+        {"name": "Northland",                 "provinces": ["NTL"]},
+    ]
+
+    # Flat rates per zone per CBM tier (source: "Oversized Shopify Rates" tab)
+    # Tier index: 0=0.16-0.25, 1=0.25-0.50, 2=0.50-0.75, 3=0.75-1.00, 4=1.00-1.25,
+    #             5=1.25-1.50, 6=1.50-1.75, 7=1.75-2.00, 8=2.00-2.50, 9=2.50+
+    ZONE_RATES = {
+        "Christchurch":              [ 40,  40,  40,  40,  40,  45,  55,  60,  70,  85],
+        "Upper South Island":        [ 55,  55,  55,  75,  95, 115, 135, 155, 175, 220],
+        "Lower South Island":        [ 65,  65,  65,  85, 105, 130, 155, 175, 200, 245],
+        "NI Lower":                  [ 65,  65,  75,  95, 120, 150, 175, 200, 230, 285],
+        "Waikato":                   [ 65,  65,  85, 120, 150, 185, 220, 255, 285, 355],
+        "Bay of Plenty / Gisborne":  [ 65,  65,  85, 120, 155, 185, 220, 255, 290, 355],
+        "Taranaki / Wan / HB":       [ 65,  65, 110, 150, 195, 240, 285, 325, 370, 455],
+        "Auckland":                  [ 65,  65,  65,  90, 115, 140, 165, 190, 215, 265],
+        "Northland":                 [ 70,  75, 125, 170, 220, 265, 315, 365, 410, 510],
+    }
+
+    # Map starting CBM string in profile name → tier index
+    TIER_MAP = {
+        "0.16": 0, "0.25": 1, "0.50": 2, "0.75": 3, "1.00": 4,
+        "1.25": 5, "1.50": 6, "1.75": 7, "2.00": 8, "2.50": 9,
+    }
 
     # ── Step 1: fetch all delivery profiles ──────────────────────────────────
     query = """
@@ -266,19 +298,6 @@ async def sync_shopify_zones():
             "profiles_found": [p["name"] for p in all_profiles]
         }
 
-    # ── NED zone → NZ province mapping ───────────────────────────────────────
-    # Province codes used by Shopify for New Zealand
-    zone_defs = [
-        {"name": "Christchurch",             "provinces": ["CAN"],                         "rate_key": "oz_chch"},
-        {"name": "South Island",             "provinces": ["OTA","STL","MBH","WTC","NSN","TAS"], "rate_key": "oz_si"},
-        {"name": "NI Lower",                 "provinces": ["WGN","MWT","HKB"],             "rate_key": "oz_ni_lower"},
-        {"name": "Waikato",                  "provinces": ["WKO"],                         "rate_key": "oz_waikato"},
-        {"name": "Bay of Plenty / Gisborne", "provinces": ["BOP","GIS"],                  "rate_key": "oz_bop_gis"},
-        {"name": "Taranaki",                 "provinces": ["TKI"],                         "rate_key": "oz_taranaki"},
-        {"name": "Auckland",                 "provinces": ["AUK"],                         "rate_key": "oz_ni_upper"},
-        {"name": "Far North",                "provinces": ["NTL"],                         "rate_key": "oz_far_north"},
-    ]
-
     mutation = """
     mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
       deliveryProfileUpdate(id: $id, profile: $profile) {
@@ -306,13 +325,22 @@ async def sync_shopify_zones():
             for e in lg.get("locationGroupZones", {}).get("edges", [])
         ]
 
-        # Build zone create payloads — use tier-0 rate (smallest CBM, 0.16–0.25 m³)
+        # Determine CBM tier index from profile name
+        tier_idx = None
+        name_lower = profile_name.lower()
+        for cbm_key, idx in TIER_MAP.items():
+            if cbm_key in name_lower:
+                tier_idx = idx
+                break
+        if tier_idx is None:
+            results.append({"profile": profile_name, "skipped": True,
+                            "reason": "No CBM tier found in name — manual setup required"})
+            continue
+
+        # Build zone payloads with per-profile flat rates
         zones_to_create = []
-        for zdef in zone_defs:
-            rate = oz_rates.get(zdef["rate_key"], [None])[0]
-            if rate is None:
-                # Far North — by request, skip (no flat rate)
-                continue
+        for zdef in ZONE_DEFS:
+            rate = ZONE_RATES[zdef["name"]][tier_idx]
             zones_to_create.append({
                 "zone": {
                     "name": zdef["name"],
@@ -349,11 +377,12 @@ async def sync_shopify_zones():
 
         errs = (result.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
         results.append({
-            "profile":        profile_name,
-            "success":        len(errs) == 0,
-            "zones_created":  len(zones_to_create),
-            "zones_deleted":  len(existing_zone_ids),
-            "errors":         errs,
+            "profile":       profile_name,
+            "success":       len(errs) == 0,
+            "tier_index":    tier_idx,
+            "zones_created": len(zones_to_create),
+            "zones_deleted": len(existing_zone_ids),
+            "errors":        errs,
         })
 
     return {"results": results, "profiles_processed": len(oversized)}
