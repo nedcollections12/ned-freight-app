@@ -172,7 +172,7 @@ async def test_rate(province:str="", city:str="", postcode:str="", order_value:f
 
 @app.get("/shopify/install")
 async def shopify_install(shop: str):
-    scopes = "read_shipping,write_shipping"
+    scopes = "read_shipping,write_shipping,read_products"
     redirect_uri = f"{APP_URL}/shopify/callback"
     url = (f"https://{shop}/admin/oauth/authorize"
            f"?client_id={SHOPIFY_API_KEY}&scope={scopes}"
@@ -589,6 +589,208 @@ async def check_zones():
                 })
         out.append({"profile": profile["name"], "zone_count": len(zones_out), "zones": zones_out})
     return out
+
+
+@app.post("/api/sync-product-profiles")
+async def sync_product_profiles():
+    """Assign Shopify products to their oversized delivery profiles based on CBM spreadsheet data."""
+    if not TOKEN_FILE.exists():
+        raise HTTPException(400, "No Shopify token. Re-auth at /shopify/install first.")
+
+    token_data = json.loads(TOKEN_FILE.read_text())
+    token, shop = token_data["token"], token_data["shop"]
+    headers  = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    gql_url  = f"https://{shop}/admin/api/2024-04/graphql.json"
+
+    # Spreadsheet data: profile name → lists of product titles and SKUs
+    # Source: NED Collections Oversized product catagories.xlsx
+    PROFILE_PRODUCTS = {
+        "Oversized 0.16-0.25m3": {
+            "names": ["Beu Chair","Boon Pouf Set","Broome Bedside","Carros Coffee Table","Circular Mirror",
+                      "Dawn Long Ottoman","Dawn Ottoman","Elm Bedside","Kahn Table","Lennox Bedside",
+                      "Lume Ottoman","Malli Bar Stool","Matte Table","Niche Side Table","Nodi Chair",
+                      "Otto Bedside","Peninsula Ottoman","RT-1260","RT-1262","Read Dining Chair",
+                      "Story 2 Seater","Surge Floor Lamp","Tres Chair","Tumo Chair"],
+            "skus":  ["24101401","555","8101","BS-1344A - Black","HE6262","MC-7495CH","MC-9523CH",
+                      "T301","TC092","WD-1797A-Blk","WF-1E019","WF-1E029","WHF-1E003",
+                      "ottoman-A","ottoman-B"],
+        },
+        "Oversized 0.25-0.50m3": {
+            "names": ["Alan Chair","Alister Bench","Arch Floor Mirror","Arlo Chair","Bay Chair",
+                      "Beu Bar Stool","Canta Coffee Table","Drift Bedhead","Dundee Bench",
+                      "Elm Coffee Table","Elm Sideboard","Elm TV Unit","Fara Dining Table",
+                      "Fara Extendable Dining Table","Gaudi Bench","George Coffee Table","Halo Chair",
+                      "Hickory Large Ottoman","Jay Table","Le Bons Bench","Lou Chair","Lucca Dining Table",
+                      "Luma Coffee Table","Mia Occasional Chair","Milan Coffee Table","Nova Coffee Table",
+                      "Oki Low Table","Osca Table","Otte Dining Table","Porto Dining Table",
+                      "Read Bar Stool","Tanner Chair","Tuscany Dining Chair"],
+            "skus":  ["3902","553","A460A","Alice-DT-180","Alice-EX","BS-1797B-Blk","C303","C304",
+                      "DC-S197V1","Dundee","GINA-CTR","HE1288","HE3719","LDC-295A","MC-7565BC",
+                      "MC-7632CH-A","MC-7790CH","RT-S124A","RT-S260","TC091","TD077","TD097-220",
+                      "TITONI-CT"],
+        },
+        "Oversized 0.50-0.75m3": {
+            "names": ["Bayside Chair","Dawn Arm Chair","Dossier Sofa 1 Seater",
+                      "Dossier Sofa 1 Seater Left Arm","Dossier Sofa 1 Seater Right Arm",
+                      "Elm TV Unit","French Swivel Chair","French Swivel Chair Wooden Trim",
+                      "Grace Sofa 1 Seater","Halo Chair","Indo Buffet","Kuva Lounge Chair",
+                      "LDB-170","Lune Bed","Lune Bedhead","Niche Dining Table","Nord Chair",
+                      "Otley Dining Table","Rue Bistro Chair","Sable TV Unit","Tanner Chair",
+                      "Theo Swivel Chair","Vero Table"],
+            "skus":  ["34354-FK-1.5AL-F","34422-FK-1.5AL-F","34422-FK-1.5PL-F","34422-FK-1.5PR-F",
+                      "A391A","A974","French Chair","HBC247001","HE1288","HSF255001","MC-7764LC",
+                      "MC-7779DT","MC-7805BU","WF-1F019A"],
+        },
+        "Oversized 0.75-1.00m3": {
+            "names": ["Cloudy Buffet","Dossier Sofa 1 Seater Chaise","Drift Swivel Chair",
+                      "Elm Sideboard","Leo Sideboard","Niche Dining Table","Noel Buffet"],
+            "skus":  ["34422-FK-CS-F","Drift Chair","HE3719","MC-7800BU","MC-7805BU","NC06-J-1"],
+        },
+        "Oversized 1.00-1.25m3": {
+            "names": ["Dossier Sofa Corner","Drift Chair","Drift Left Arm Module","Drift Middle Module",
+                      "Drift Right Arm Module","Faker Dining Table","Grace Sofa 1 Seater Chaise",
+                      "Grace Sofa 1 Seater Left Arm","Grace Sofa 1 Seater Right Arm",
+                      "Grace Sofa Corner","Lume Sofa"],
+            "skus":  ["34354-FK-1.5PL-F","34354-FK-1.5PR-F","34354-FK-CNR-F","34354-FK-CS-F",
+                      "34422-FK-C-F","OSF-1582-Left-SP","OSF-1582-Middle-B","OSF-1582-Right-E"],
+        },
+        "Oversized 1.25-1.50m3": {
+            "names": ["Alice Dining Table","Fleur Sofa"],
+            "skus":  ["ROSDT"],
+        },
+        "Oversized 1.50-1.75m3": {
+            "names": ["Verra Armless Sofa"],
+            "skus":  [],
+        },
+        "Oversized 1.75-2.00m3": {
+            "names": ["Harlow Sofa","Hendrix Sofa","Milana Sofa"],
+            "skus":  ["MC-7600SF","Mingle Sofa"],
+        },
+        "Oversized 2.00-2.50m3": {
+            "names": ["Dyne Sofa"],
+            "skus":  ["S2588"],
+        },
+        "Oversized 2.50m3+": {
+            "names": ["Dyne Sofa","Montana Sofa"],
+            "skus":  ["34394-FK-F","S2588"],
+        },
+    }
+
+    # ── Step 1: Fetch all products (paginated) ────────────────────────────────
+    product_query = """
+    query($cursor: String) {
+      products(first: 250, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        edges {
+          node {
+            id title
+            variants(first: 100) {
+              edges { node { id sku } }
+            }
+          }
+        }
+      }
+    }
+    """
+    sku_map   = {}  # sku.lower() -> [variant_gid, ...]
+    title_map = {}  # title.lower() -> [variant_gid, ...]
+    cursor = None
+    while True:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(gql_url, headers=headers,
+                                  json={"query": product_query, "variables": {"cursor": cursor}})
+            pdata = r.json()
+        if pdata.get("errors") and not pdata.get("data"):
+            return {"error": "Product query failed — token may lack read_products scope",
+                    "gql_errors": pdata["errors"]}
+        products_page = (pdata.get("data") or {}).get("products", {})
+        for edge in products_page.get("edges", []):
+            node = edge["node"]
+            title_key = node["title"].strip().lower()
+            for ve in node["variants"]["edges"]:
+                vid = ve["node"]["id"]
+                sku = (ve["node"]["sku"] or "").strip()
+                if sku:
+                    sku_map.setdefault(sku.lower(), []).append(vid)
+                title_map.setdefault(title_key, []).append(vid)
+        page_info = products_page.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info["endCursor"]
+
+    # ── Step 2: Fetch delivery profile IDs ────────────────────────────────────
+    dp_query = """{ deliveryProfiles(first: 30) { edges { node { id name } } } }"""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(gql_url, headers=headers, json={"query": dp_query})
+        dp_data = r.json()
+    profile_id_map = {
+        e["node"]["name"]: e["node"]["id"]
+        for e in (dp_data.get("data") or {}).get("deliveryProfiles", {}).get("edges", [])
+    }
+
+    # ── Step 3: Match variants + assign to profiles ────────────────────────────
+    mutation = """
+    mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
+      deliveryProfileUpdate(id: $id, profile: $profile) {
+        profile { id name }
+        userErrors { field message }
+      }
+    }
+    """
+    results = []
+    for profile_name, sources in PROFILE_PRODUCTS.items():
+        profile_id = profile_id_map.get(profile_name)
+        if not profile_id:
+            results.append({"profile": profile_name, "error": "Profile not found in Shopify"})
+            continue
+
+        variant_ids = set()
+        unmatched_skus, unmatched_names = [], []
+
+        for sku in sources["skus"]:
+            found = sku_map.get(sku.lower())
+            if found:
+                variant_ids.update(found)
+            else:
+                unmatched_skus.append(sku)
+
+        for name in sources["names"]:
+            found = title_map.get(name.lower())
+            if found:
+                variant_ids.update(found)
+            else:
+                unmatched_names.append(name)
+
+        if not variant_ids:
+            results.append({"profile": profile_name, "warning": "No variants matched",
+                            "unmatched_skus": unmatched_skus, "unmatched_names": unmatched_names})
+            continue
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(gql_url, headers=headers,
+                                  json={"query": mutation,
+                                        "variables": {
+                                            "id": profile_id,
+                                            "profile": {"variantsToAssociate": list(variant_ids)}
+                                        }})
+            mdata = r.json()
+
+        errs = (mdata.get("data") or {}).get("deliveryProfileUpdate", {}).get("userErrors", [])
+        results.append({
+            "profile":          profile_name,
+            "success":          not bool(errs),
+            "variants_assigned": len(variant_ids),
+            "unmatched_skus":   unmatched_skus,
+            "unmatched_names":  unmatched_names,
+            "errors":           errs,
+        })
+
+    total_products_indexed = len({v for vlist in title_map.values() for v in vlist})
+    return {
+        "products_indexed": total_products_indexed,
+        "skus_indexed":     len(sku_map),
+        "results":          results,
+    }
 
 
 @app.get("/health")
