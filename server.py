@@ -419,62 +419,44 @@ async def sync_shopify_zones():
 
 @app.get("/api/check-zones")
 async def check_zones():
-    """Return zone names, province codes, and rates for every Oversized profile."""
+    """Return zone names, province codes, and rates for every Oversized profile (REST API)."""
     if not TOKEN_FILE.exists():
         raise HTTPException(400, "No token.")
     token_data = json.loads(TOKEN_FILE.read_text())
     token, shop = token_data["token"], token_data["shop"]
-    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    gql_url = f"https://{shop}/admin/api/2024-04/graphql.json"
-    query = """
-    {
-      deliveryProfiles(first: 20) {
-        edges { node {
-          id name
-          profileLocationGroups {
-            locationGroupZones(first: 30) {
-              edges { node {
-                zone {
-                  id name
-                  countries {
-                    code
-                    provinces { code name }
-                  }
-                }
-                methodDefinitions(first: 5) {
-                  edges { node {
-                    name
-                    rateProvider { ... on DeliveryRateDefinition { price { amount } } }
-                  }}
-                }
-              }}
-            }
-          }
-        }}
-      }
-    }
-    """
+    headers = {"X-Shopify-Access-Token": token}
+
+    # Use REST API — GET all delivery profiles
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(gql_url, headers=headers, json={"query": query})
+        r = await client.get(
+            f"https://{shop}/admin/api/2024-04/delivery_profiles.json",
+            headers=headers
+        )
         data = r.json()
+
     out = []
-    for e in data.get("data", {}).get("deliveryProfiles", {}).get("edges", []):
-        p = e["node"]
-        if "oversized" not in p["name"].lower():
+    for profile in data.get("delivery_profiles", []):
+        if "oversized" not in profile.get("name", "").lower():
             continue
-        zones = []
-        for lg in p.get("profileLocationGroups", []):
-            for ze in lg.get("locationGroupZones", {}).get("edges", []):
-                z = ze["node"]["zone"]
+        zones_out = []
+        for lg in profile.get("profile_location_groups", []):
+            for zone in lg.get("location_group_zones", []):
+                z = zone.get("zone", {})
+                provinces = []
+                for c in z.get("countries", []):
+                    for prov in c.get("provinces", []):
+                        provinces.append(prov.get("code", ""))
                 methods = [
-                    {"name": m["node"]["name"],
-                     "price": m["node"]["rateProvider"].get("price", {}).get("amount")}
-                    for m in ze["node"]["methodDefinitions"]["edges"]
+                    {"name": m.get("name"), "price": m.get("price", {}).get("amount")}
+                    for m in zone.get("method_definitions", [])
                 ]
-                provinces = [pr["code"] for c in z["countries"] for pr in c["provinces"]]
-                zones.append({"zone_id": z["id"], "zone_name": z["name"],
-                              "provinces": provinces, "rates": methods})
-        out.append({"profile": p["name"], "zone_count": len(zones), "zones": zones})
+                zones_out.append({
+                    "zone_id":   z.get("id"),
+                    "zone_name": z.get("name"),
+                    "provinces": sorted(provinces),
+                    "rates":     methods
+                })
+        out.append({"profile": profile["name"], "zone_count": len(zones_out), "zones": zones_out})
     return out
 
 
