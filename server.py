@@ -33,6 +33,19 @@ PRODUCTS_FILE = BASE_DIR / "data" / "oversized_products.json"
 app = FastAPI(title="NED Freight App", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+@app.middleware("http")
+async def shopify_embed_headers(request, call_next):
+    """Allow Shopify admin to embed this app's UI in an iframe."""
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "frame-ancestors https://*.myshopify.com https://admin.shopify.com"
+    )
+    # Strip any X-Frame-Options header that would block embedding
+    if "x-frame-options" in {k.lower() for k in response.headers}:
+        del response.headers["X-Frame-Options"]
+    return response
+
 def load_rates():
     with open(RATES_FILE) as f: return json.load(f)
 
