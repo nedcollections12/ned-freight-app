@@ -117,15 +117,30 @@
   <section class="tab" id="tab-tester">
     <div class="card">
       <h2>Test a quote</h2>
-      <p class="hint">Simulate a customer at checkout. See the rate NED Freight would return.</p>
-      <div class="row">
-        <input type="text" id="qt-city" placeholder="Destination city (e.g. Auckland)" value="Auckland" style="width:200px;">
-        <input type="text" id="qt-postcode" placeholder="Postcode" value="1010" style="width:120px;">
-        <input type="text" id="qt-address" placeholder="Street address" value="1 Queen St" style="width:240px;">
-        <input type="number" step="0.001" id="qt-cbm" placeholder="Total CBM (m³)" value="0.5" style="width:120px;">
-        <input type="number" id="qt-qty" placeholder="Qty" value="1" style="width:80px;">
-        <button class="btn btn-primary" onclick="runQuote()">Get quote</button>
+      <p class="hint">Build a real cart from your products and see what NED Freight quotes at checkout.</p>
+
+      <h3 style="font-size:13px;font-weight:600;color:#374151;margin:14px 0 8px;">1. Destination</h3>
+      <div class="row" style="margin-bottom:18px;">
+        <input type="text" id="qt-city" placeholder="City" value="Auckland" style="width:160px;">
+        <input type="text" id="qt-postcode" placeholder="Postcode" value="1010" style="width:110px;">
+        <input type="text" id="qt-address" placeholder="Street address" value="1 Queen St" style="width:260px;">
       </div>
+
+      <h3 style="font-size:13px;font-weight:600;color:#374151;margin:14px 0 8px;">2. Add products</h3>
+      <div style="position:relative;margin-bottom:8px;">
+        <input type="text" id="product-search" placeholder="Search products by name, variant, SKU…" style="width:100%;padding:9px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;" autocomplete="off">
+        <div id="product-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d1d5db;border-top:none;border-radius:0 0 6px 6px;max-height:300px;overflow-y:auto;z-index:10;box-shadow:0 4px 12px rgba(0,0,0,0.08);"></div>
+      </div>
+
+      <h3 style="font-size:13px;font-weight:600;color:#374151;margin:14px 0 8px;">3. Cart</h3>
+      <div id="cart-table-wrap">
+        <p style="font-size:13px;color:#9ca3af;padding:14px;text-align:center;background:#f9fafb;border-radius:6px;">No items added yet.</p>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;margin-top:14px;">
+        <button class="btn btn-primary" onclick="runQuote()" id="get-quote-btn" disabled>Get quote</button>
+      </div>
+
       <div id="quote-output"></div>
     </div>
   </section>
@@ -388,23 +403,155 @@ document.getElementById('search').addEventListener('input', renderTable);
 document.getElementById('filter-category').addEventListener('change', renderTable);
 document.getElementById('filter-size').addEventListener('change', renderTable);
 
-// Quote tester
+// Quote tester — cart builder
+let cart = []; // {variant_id, product, variant, sku, cbm, qty}
+
+function renderCart() {
+  const wrap = document.getElementById('cart-table-wrap');
+  const btn = document.getElementById('get-quote-btn');
+  if (cart.length === 0) {
+    wrap.innerHTML = '<p style="font-size:13px;color:#9ca3af;padding:14px;text-align:center;background:#f9fafb;border-radius:6px;">No items added yet.</p>';
+    btn.disabled = true;
+    return;
+  }
+  const totalCbm = cart.reduce((s, i) => s + i.cbm * i.qty, 0);
+  const totalItems = cart.reduce((s, i) => s + i.qty, 0);
+  wrap.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Product</th><th>Variant</th><th>SKU</th>
+          <th style="text-align:right;">CBM each</th>
+          <th style="text-align:center;width:80px;">Qty</th>
+          <th style="text-align:right;">Subtotal CBM</th>
+          <th style="width:50px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${cart.map((item, i) => `
+          <tr>
+            <td>${escapeHtml(item.product)}</td>
+            <td>${escapeHtml(item.variant)}</td>
+            <td><code style="font-size:11px">${escapeHtml(item.sku)}</code></td>
+            <td class="num">${item.cbm.toFixed(4)}</td>
+            <td style="text-align:center;"><input type="number" min="1" value="${item.qty}" onchange="updateQty(${i}, this.value)" style="width:60px;padding:4px;text-align:center;border:1px solid #d1d5db;border-radius:4px;"></td>
+            <td class="num"><b>${(item.cbm * item.qty).toFixed(4)}</b></td>
+            <td><button onclick="removeFromCart(${i})" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:16px;" title="Remove">×</button></td>
+          </tr>
+        `).join('')}
+        <tr style="background:#f3f4f6;font-weight:600;">
+          <td colspan="4" style="text-align:right;">Total (${totalItems} items)</td>
+          <td></td>
+          <td class="num">${totalCbm.toFixed(4)} m³</td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+  btn.disabled = false;
+}
+
+function addToCart(variant) {
+  // Check if already in cart — if so, bump qty
+  const existing = cart.find(i => i.variant_id === variant.variant_id);
+  if (existing) {
+    existing.qty += 1;
+  } else {
+    cart.push({
+      variant_id: variant.variant_id,
+      product: variant.product,
+      variant: variant.variant,
+      sku: variant.sku,
+      cbm: variant.cbm || 0,
+      qty: 1
+    });
+  }
+  renderCart();
+  document.getElementById('product-search').value = '';
+  document.getElementById('product-results').style.display = 'none';
+}
+
+function removeFromCart(idx) {
+  cart.splice(idx, 1);
+  renderCart();
+  document.getElementById('quote-output').innerHTML = '';
+}
+
+function updateQty(idx, val) {
+  cart[idx].qty = Math.max(1, parseInt(val) || 1);
+  renderCart();
+}
+
+// Product search dropdown
+const searchInput = document.getElementById('product-search');
+const resultsBox = document.getElementById('product-results');
+
+searchInput.addEventListener('input', (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  if (q.length < 2) {
+    resultsBox.style.display = 'none';
+    return;
+  }
+  if (allVariants.length === 0) {
+    // Lazy-load if not already loaded by CBM tab
+    loadCbm().then(() => filterAndShow(q));
+    return;
+  }
+  filterAndShow(q);
+});
+
+function filterAndShow(q) {
+  const matches = allVariants.filter(v =>
+    (v.product || '').toLowerCase().includes(q) ||
+    (v.variant || '').toLowerCase().includes(q) ||
+    (v.sku || '').toLowerCase().includes(q)
+  ).slice(0, 20);
+  if (matches.length === 0) {
+    resultsBox.innerHTML = '<div style="padding:10px;color:#9ca3af;font-size:13px;">No matches</div>';
+  } else {
+    resultsBox.innerHTML = matches.map(v => `
+      <div style="padding:8px 12px;cursor:pointer;border-bottom:1px solid #f3f4f6;font-size:13px;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='#fff'" onclick='addToCart(${JSON.stringify(v).replace(/'/g, "&apos;")})'>
+        <div style="font-weight:500;">${escapeHtml(v.product)} <span style="color:#9ca3af;font-weight:normal;">— ${escapeHtml(v.variant)}</span></div>
+        <div style="color:#6b7280;font-size:12px;margin-top:2px;">
+          <code style="font-size:11px">${escapeHtml(v.sku)}</code>
+          · ${escapeHtml(v.category)}
+          · CBM: ${(v.cbm || 0).toFixed(4)}m³
+        </div>
+      </div>
+    `).join('');
+  }
+  resultsBox.style.display = 'block';
+}
+
+// Click outside to close dropdown
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#product-search') && !e.target.closest('#product-results')) {
+    resultsBox.style.display = 'none';
+  }
+});
+
 async function runQuote() {
+  if (cart.length === 0) return;
   const city = document.getElementById('qt-city').value;
   const pc = document.getElementById('qt-postcode').value;
   const addr = document.getElementById('qt-address').value;
-  const cbm = parseFloat(document.getElementById('qt-cbm').value);
-  const qty = parseInt(document.getElementById('qt-qty').value) || 1;
   const out = document.getElementById('quote-output');
   out.innerHTML = '<div class="loading" style="padding:20px;">Quoting…</div>';
   try {
+    const items = cart.map(i => ({
+      name: i.product + ' (' + i.variant + ')',
+      sku: i.sku,
+      quantity: i.qty,
+      grams: Math.round((i.cbm || 0) * 1000),
+      price: 10000
+    }));
     const r = await fetch('/shopify/rates/debug', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         rate: {
           destination: { country: 'NZ', city, postal_code: pc, address1: addr, name: 'Test' },
-          items: [{ name: 'Test', sku: 'TEST', quantity: qty, grams: Math.round(cbm * 1000), price: 10000 }],
+          items,
           currency: 'NZD'
         }
       })
@@ -417,7 +564,7 @@ async function runQuote() {
     out.innerHTML = `
       <div class="quote-result">
         <div class="price">$${data.customer_price.toFixed(2)} <small style="font-size:13px;color:#6b7280;font-weight:400;">customer pays</small></div>
-        <div class="desc">Cart CBM: ${data.cart_cbm}m³ → ${data.chosen_carrier} (${data.chosen_service}) raw $${data.raw_cost} × 1.10 markup</div>
+        <div class="desc">Cart CBM: ${data.cart_cbm}m³ → ${data.chosen_carrier} (${data.chosen_service}) — raw $${data.raw_cost} × ${data.ned_markup} markup</div>
         <table style="margin-top:14px;">
           <thead><tr><th>Carrier</th><th>Service</th><th style="text-align:right;">Raw cost</th><th>Notes</th></tr></thead>
           <tbody>
