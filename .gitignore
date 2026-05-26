@@ -1,0 +1,15 @@
+# Credentials — never commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Shopify auth token (persisted by /shopify/callback)
+data/shopify_token.json

@@ -3,6 +3,12 @@
 import json, math, os, hmac, hashlib
 from pathlib import Path
 from typing import Optional
+# Load .env before importing anything that reads env vars
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass  # dotenv only needed for local dev; Render injects env vars natively
 import uvicorn
 import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
@@ -10,6 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from zones import detect_zone, get_oversized_zone
+import live_rates  # Live carrier-rate calculation (CP/MF/DF)
+
+# Free-shipping threshold — orders ≥ this get free freight
+FREE_SHIPPING_THRESHOLD = float(os.environ.get("FREE_SHIPPING_THRESHOLD", "500"))
 
 SHOPIFY_API_KEY    = os.environ.get("SHOPIFY_API_KEY", "")
 SHOPIFY_API_SECRET = os.environ.get("SHOPIFY_API_SECRET", "")
@@ -61,46 +71,97 @@ def lookup_oversized_rate(rates, oz_zone_id, cbm):
 
 @app.post("/shopify/rates")
 async def shopify_rates(request: Request):
-    try: body = await request.json()
-    except: raise HTTPException(400, "Invalid JSON")
+    """
+    Shopify Carrier Service callback.
+    Quotes Castle Parcels (live), Mainfreight + Dailyfreight (formula), picks cheapest.
+    Applies NED markup. Returns single rate to Shopify.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
     rate_request = body.get("rate", {})
-    destination = rate_request.get("destination", {})
-    items = rate_request.get("items", [])
-    province = destination.get("province", "")
-    city = destination.get("city", "")
-    postcode = destination.get("zip", "")
-    is_rural = str(destination.get("address2", "")).lower().strip() == "rural"
-    std_zone = detect_zone(province=province, city=city, postcode=postcode)
-    oz_zone = get_oversized_zone(std_zone)
-    rates_data = load_rates()
-    settings = rates_data["settings"]
-    free_threshold = settings.get("free_freight_threshold", 7500)
-    rural_surcharge = settings.get("rural_surcharge", 14)
-    products = load_products()
-    order_value = 0.0; total_cbm = 0.0; has_oversized = False
-    for item in items:
-        qty = int(item.get("quantity", 1))
-        price = int(item.get("price", 0)) / 100.0
-        order_value += price * qty
-        cbm_each = None
-        for key in [str(item.get("variant_id","")), str(item.get("product_id",""))]:
-            if key in products: cbm_each = products[key].get("cbm"); break
-        if cbm_each and float(cbm_each) > 0.160:
-            has_oversized = True; total_cbm += float(cbm_each) * qty
-    currency = settings.get("currency", "NZD")
-    if order_value >= free_threshold:
-        return {"rates": [{"service_name":"Free Freight","service_code":"FREE","total_price":"0","currency":currency}]}
-    if has_oversized and total_cbm > 0:
-        oz_rate = lookup_oversized_rate(rates_data, oz_zone, total_cbm)
-        if oz_rate is not None:
-            total = math.ceil(oz_rate + (rural_surcharge if is_rural else 0))
-            return {"rates": [{"service_name":"Freight" + (" (Rural)" if is_rural else ""),"service_code":"OVERSIZED","total_price":str(int(total*100)),"currency":currency}]}
-        return {"rates": [{"service_name":"Freight — Contact Us","service_code":"BY_REQUEST","total_price":"0","currency":currency}]}
-    std_rate = lookup_standard_rate(rates_data, std_zone, order_value)
-    if std_rate is not None:
-        total = math.ceil(std_rate + (rural_surcharge if is_rural else 0))
-        return {"rates": [{"service_name":"Freight" + (" (Rural)" if is_rural else ""),"service_code":"STANDARD","total_price":str(int(total*100)),"currency":currency}]}
-    return {"rates": [{"service_name":"Freight — Contact Us","service_code":"BY_REQUEST","total_price":"0","currency":currency}]}
+    destination  = rate_request.get("destination", {})
+    items        = rate_request.get("items", [])
+    currency     = rate_request.get("currency", "NZD")
+
+    # Cart subtotal (Shopify sends item.price in cents)
+    order_value = sum(
+        (int(i.get("price", 0)) / 100.0) * int(i.get("quantity", 1))
+        for i in items
+    )
+
+    # Free shipping over threshold
+    if order_value >= FREE_SHIPPING_THRESHOLD:
+        return {"rates": [{
+            "service_name": "Free Shipping",
+            "service_code": "FREE",
+            "total_price":  "0",
+            "currency":     currency,
+            "description":  f"Free freight on orders over ${int(FREE_SHIPPING_THRESHOLD)}"
+        }]}
+
+    # Live carrier quote
+    result = await live_rates.calculate_freight(items, destination)
+
+    if not result.get("success"):
+        # No carrier matched — fall back to "contact us" rate
+        return {"rates": [{
+            "service_name": "Freight — Contact Us",
+            "service_code": "BY_REQUEST",
+            "total_price":  "0",
+            "currency":     currency,
+            "description":  "Custom quote required for this destination"
+        }]}
+
+    # Round customer price up to nearest dollar for a clean display
+    price_cents = int(math.ceil(result["customer_price"]) * 100)
+
+    return {
+        "rates": [{
+            "service_name": "Standard Delivery",
+            "service_code": "NED_LIVE",
+            "total_price":  str(price_cents),
+            "currency":     currency,
+            "description":  f"{result['chosen_carrier']} — {result['chosen_service']}",
+        }]
+    }
+
+
+@app.post("/shopify/rates/debug")
+async def shopify_rates_debug(request: Request):
+    """
+    Same as /shopify/rates but returns all carrier quotes for debugging.
+    NOT registered as a Shopify carrier service — use for testing only.
+    """
+    body = await request.json()
+    rate_request = body.get("rate", {})
+    items        = rate_request.get("items", [])
+    destination  = rate_request.get("destination", {})
+    return await live_rates.calculate_freight(items, destination, debug=True)
+
+
+@app.get("/api/quote")
+async def api_quote(
+    city: str = "Auckland",
+    cbm:  float = 0.5,
+    qty:  int = 1,
+):
+    """
+    Test endpoint: simulate a Shopify rate request from query params.
+    Example: /api/quote?city=Auckland&cbm=0.5&qty=2
+    """
+    items = [{"grams": int(cbm * 1000), "quantity": qty, "price": 5000}]  # weight = CBM in kg → grams
+    destination = {"city": city, "country": "NZ", "postal_code": ""}
+    return await live_rates.calculate_freight(items, destination, debug=True)
+
+
+@app.post("/api/reload-rates")
+async def reload_rates():
+    """Force reload of carrier_rates.json without restarting the app."""
+    live_rates.reload_carrier_rates()
+    return {"status": "ok", "message": "Carrier rates reloaded"}
 
 @app.get("/api/rates")
 async def get_rates(): return load_rates()
