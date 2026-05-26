@@ -79,6 +79,21 @@
   .src-cin7 { background: #dbeafe; color: #1e40af; }
   .src-desc { background: #fef3c7; color: #92400e; }
   .src-default { background: #f3f4f6; color: #6b7280; }
+
+  /* Carrier blocks */
+  .carrier-block { margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid #e5e7eb; }
+  .carrier-block:last-child { border-bottom: none; }
+  .carrier-block h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; color: #1a1a1a; }
+  .carrier-block h4 { font-size: 13px; font-weight: 600; margin: 16px 0 8px; color: #374151; }
+  .carrier-block ul { margin: 6px 0 6px 22px; font-size: 13px; }
+  .carrier-meta { display: grid; gap: 6px; padding: 10px 12px; background: #f9fafb; border-radius: 6px; font-size: 12.5px; margin-bottom: 12px; }
+  .carrier-meta b { color: #374151; }
+  .carrier-meta code { background: #fff; padding: 1px 6px; border: 1px solid #e5e7eb; border-radius: 4px; font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }
+  .callout-info { background: #f0f9ff; border-left: 3px solid #0ea5e9; padding: 10px 14px; border-radius: 4px; font-size: 13px; color: #0c4a6e; margin-bottom: 12px; }
+  .rate-table { font-size: 12.5px; }
+  .rate-table th { background: #fafafa; }
+  .rate-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .table-wrap { overflow-x: auto; max-width: 100%; }
 </style>
 </head>
 <body>
@@ -91,6 +106,7 @@
 <nav>
   <button class="active" data-tab="cbm">Product CBMs</button>
   <button data-tab="tester">Test a quote</button>
+  <button data-tab="carriers">Carrier rate cards</button>
   <button data-tab="docs">How it works</button>
 </nav>
 
@@ -204,7 +220,16 @@
     </div>
   </section>
 
-  <!-- TAB 3: Docs -->
+  <!-- TAB: Carrier rate cards -->
+  <section class="tab" id="tab-carriers">
+    <div class="card">
+      <h2>Carrier rate cards</h2>
+      <p class="hint">Reference rate cards and technicalities for each carrier NED Freight quotes from. Live carrier costs at checkout use the formulas / API calls below.</p>
+      <div id="carriers-content" class="loading">Loading…</div>
+    </div>
+  </section>
+
+  <!-- TAB: Docs -->
   <section class="tab docs" id="tab-docs">
     <div class="card">
       <h2>How NED Freight works</h2>
@@ -307,8 +332,162 @@ document.querySelectorAll('nav button').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'cbm' && allVariants.length === 0) loadCbm();
+    if (btn.dataset.tab === 'carriers' && !window._carriersLoaded) loadCarriers();
   });
 });
+
+// Carriers tab
+async function loadCarriers() {
+  window._carriersLoaded = true;
+  const wrap = document.getElementById('carriers-content');
+  wrap.className = 'loading';
+  try {
+    const r = await fetch('/api/carrier-info');
+    const data = await r.json();
+    wrap.className = '';
+    wrap.innerHTML = renderCarriers(data);
+  } catch (e) {
+    wrap.innerHTML = 'Failed to load: ' + e.message;
+    window._carriersLoaded = false;
+  }
+}
+
+function renderCarriers(data) {
+  return `
+    ${renderCastleParcels(data.castle_parcels)}
+    ${renderFormulaCarrier(data.mainfreight, 'mainfreight', 'Mainfreight')}
+    ${renderFormulaCarrier(data.dailyfreight, 'dailyfreight', 'Dailyfreight')}
+    ${renderKiwiExpress(data.kiwi_express)}
+  `;
+}
+
+function renderCastleParcels(cp) {
+  const m = cp._meta;
+  return `
+    <div class="carrier-block">
+      <h3>${escapeHtml(m.label)}</h3>
+      <div class="carrier-meta">
+        <div><b>Rep:</b> ${escapeHtml(m.rep)}</div>
+        <div><b>Vintage:</b> ${escapeHtml(m.vintage)}</div>
+      </div>
+      <div class="callout-info">${escapeHtml(m.note)}</div>
+      <h4>Rate table (per parcel, by cube bracket and zone)</h4>
+      <div class="table-wrap">
+        <table class="rate-table">
+          <thead>
+            <tr>
+              <th>Cube</th>
+              <th>Max kg</th>
+              ${cp.zones.map(z => `<th>${escapeHtml(z.name)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${cp.brackets.map((b, i) => `
+              <tr>
+                <td><b>${b.cube_m3}m³</b></td>
+                <td>${b.max_kg}kg</td>
+                ${cp.zones.map(z => `<td class="num">$${z.rates[i].toFixed(2)}</td>`).join('')}
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      <h4>Surcharges</h4>
+      <ul>
+        <li>Rural delivery: <b>$${cp.surcharges.rural_delivery.toFixed(2)}</b> per parcel</li>
+        <li>Residential delivery: <b>$${cp.surcharges.residential_delivery.toFixed(2)}</b> per parcel</li>
+      </ul>
+      <h4>Satchel rates</h4>
+      <ul>${cp.satchels.map(s => `<li>${escapeHtml(s.label)}: <b>$${s.price.toFixed(2)}</b></li>`).join('')}</ul>
+    </div>
+  `;
+}
+
+function renderFormulaCarrier(c, key, label) {
+  const m = c._meta;
+  const rates = c.rates;
+  const zones = [...new Set(Object.values(rates).map(r => r.zone_group))];
+  return `
+    <div class="carrier-block">
+      <h3>${escapeHtml(m.label)} — ${escapeHtml(m.service)}</h3>
+      <div class="carrier-meta">
+        <div><b>Formula:</b> <code>${escapeHtml(m.formula)}</code></div>
+        <div><b>Vintage:</b> ${escapeHtml(m.vintage)}</div>
+      </div>
+      <div class="callout-info">${escapeHtml(m.note)}</div>
+      <h4>Rate card (ex-GST, ex-FAF — formula applies the uplifts)</h4>
+      <div class="table-wrap">
+        <table class="rate-table">
+          <thead>
+            <tr>
+              <th>Destination</th>
+              <th class="num">Base</th>
+              <th class="num">Minimum</th>
+              <th class="num">Per m³</th>
+              <th>Zone group</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${Object.entries(rates).map(([city, r]) => `
+              <tr>
+                <td><b>${escapeHtml(city.replace(/^./, c => c.toUpperCase()))}</b></td>
+                <td class="num">$${r.base.toFixed(2)}</td>
+                <td class="num">$${r.min.toFixed(2)}</td>
+                <td class="num">$${r.per_m3.toFixed(2)}</td>
+                <td><small>${escapeHtml(r.zone_group)}</small></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderKiwiExpress(kx) {
+  const m = kx._meta;
+  return `
+    <div class="carrier-block">
+      <h3>${escapeHtml(m.label)} — ${escapeHtml(m.service)}</h3>
+      <div class="carrier-meta">
+        <div><b>Formula:</b> <code>${escapeHtml(m.formula)}</code></div>
+        <div><b>Vintage:</b> ${escapeHtml(m.vintage)}</div>
+      </div>
+      <div class="callout-info">${escapeHtml(m.note)}</div>
+      <h4>B2C rates (default — consumer customers)</h4>
+      ${renderKxTable(kx.b2c.rates)}
+      <h4>B2B rates (lower — wholesale customers)</h4>
+      ${renderKxTable(kx.b2b.rates)}
+    </div>
+  `;
+}
+
+function renderKxTable(rates) {
+  return `
+    <div class="table-wrap">
+      <table class="rate-table">
+        <thead>
+          <tr>
+            <th>Destination + Zone</th>
+            <th class="num">Min</th>
+            <th class="num">Base</th>
+            <th class="num">Per m³</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${Object.entries(rates).map(([key, r]) => `
+            <tr>
+              <td><b>${escapeHtml(key.replace(/_z(\d)/, ' Zone $1').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()))}</b></td>
+              <td class="num">$${r.min.toFixed(2)}</td>
+              <td class="num">$${r.base.toFixed(2)}</td>
+              <td class="num">$${r.per_m3.toFixed(2)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
 
 // CBM admin
 async function loadCbm(force = false) {

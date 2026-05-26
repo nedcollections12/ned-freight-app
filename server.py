@@ -177,6 +177,13 @@ async def reload_rates():
     return {"status": "ok", "message": "Carrier rates reloaded"}
 
 
+@app.get("/api/carrier-info")
+async def carrier_info():
+    """Return all carrier rate cards and metadata for the Carriers tab UI."""
+    with open(BASE_DIR / "data" / "carrier_rates.json") as f:
+        return json.load(f)
+
+
 # ─── CBM Admin API ─────────────────────────────────────────────────────────────
 # Pulls product weights from Shopify so the UI can browse + edit them.
 # Uses the admin access token stored in env (SHOPIFY_ADMIN_TOKEN) for write

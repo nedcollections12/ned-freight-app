@@ -1,13 +1,53 @@
 {
   "_meta": {
-    "description": "Raw carrier rates ex-GST and ex-FAF. Customer-facing rate = MAX(min, formula) × FAF × GST × NED_markup",
+    "description": "Raw carrier rates. Castle Parcels rate card is reference-only (live quotes come from GSS API). Mainfreight/Dailyfreight formulas drive the live calc.",
     "updated": "2026-05-26",
-    "source": "NED Collections Freight Matrix (Mainfreight + Dailyfreight rate cards)",
-    "origin": "Christchurch"
+    "origin": "7 Paradyne Place, Wigram, Christchurch 8042"
+  },
+  "castle_parcels": {
+    "_meta": {
+      "label":   "Castle Parcels (Post Haste)",
+      "rep":     "Antonya Hector — Antonya.hector@posthaste.co.nz — 027 209 3528",
+      "vintage": "Valid until July 2026",
+      "note":    "All rates NZD excl. GST & FAF/RUC. Live quotes returned via GoSweetSpot API in production; this table is for reference. Per-parcel pricing — no volume discount."
+    },
+    "brackets": [
+      {"cube_m3": 0.015, "max_kg": 25},
+      {"cube_m3": 0.030, "max_kg": 25},
+      {"cube_m3": 0.050, "max_kg": 25},
+      {"cube_m3": 0.075, "max_kg": 25},
+      {"cube_m3": 0.100, "max_kg": 25},
+      {"cube_m3": 0.125, "max_kg": 25},
+      {"cube_m3": 0.135, "max_kg": 25},
+      {"cube_m3": 0.160, "max_kg": 25}
+    ],
+    "zones": [
+      {"id": "chch_local",   "name": "Local (ChCh Metro)",          "rates": [3.97, 3.97, 3.97, 3.97, 3.97, 3.97, 3.97, 3.97]},
+      {"id": "chch_outer",   "name": "Outer (Outside Metro)",       "rates": [4.80, 4.80, 4.80, 4.80, 4.80, 4.80, 4.80, 4.80]},
+      {"id": "regional_si",  "name": "Regional (Kaikoura, Timaru)", "rates": [4.80, 5.55, 6.56, 7.81, 9.06, 10.31, 10.82, 22.51]},
+      {"id": "within_si",    "name": "Within Island (Nelson, Dunedin)", "rates": [5.94, 7.84, 10.37, 13.52, 16.68, 19.85, 21.11, 34.70]},
+      {"id": "ni_upper",     "name": "NI 2-Day Upper (Auckland, Hamilton)", "rates": [6.43, 8.81, 11.99, 15.95, 19.92, 23.89, 25.47, 39.89]},
+      {"id": "ni_lower",     "name": "NI 2-Day Lower (Wellington)", "rates": [5.74, 8.67, 10.44, 14.62, 19.63, 24.53, 27.14, 39.89]}
+    ],
+    "surcharges": {
+      "rural_delivery":       7.09,
+      "residential_delivery": 2.53
+    },
+    "satchels": [
+      {"label": "CPS / Small", "price": 4.78},
+      {"label": "CP / Medium", "price": 5.99},
+      {"label": "Large",       "price": 9.69},
+      {"label": "CPM / XL",    "price": 10.84}
+    ]
   },
   "mainfreight": {
-    "_formula": "MAX(min_charge, base + per_m3 * cart_cbm)",
-    "_note": "M2H two-man delivery service. Use for heavy items/sofas >25kg.",
+    "_meta": {
+      "label":   "Mainfreight",
+      "service": "M2H Two-Man Delivery",
+      "vintage": "Current rate card",
+      "formula": "MAX(min_charge, base + per_m³ × cart_CBM) × FAF (1.30) × GST (1.15)",
+      "note":    "Use for heavy/large single items (sofas, long cartons) over 25kg or that need two-man delivery."
+    },
     "rates": {
       "auckland":         {"base": 33, "min": 50, "per_m3": 71.74, "zone_group": "north_island"},
       "blenheim":         {"base": 30, "min": 37, "per_m3": 53.56, "zone_group": "south_island"},
@@ -36,8 +76,13 @@
     }
   },
   "dailyfreight": {
-    "_formula": "MAX(min_charge, per_m3 * cart_cbm)",
-    "_note": "LCL palletised. Min applies for small consignments; per-m³ for larger.",
+    "_meta": {
+      "label":   "Dailyfreight",
+      "service": "LCL (Less than Container Load) Palletised",
+      "vintage": "April 2026 rates",
+      "formula": "MAX(min_charge, per_m³ × cart_CBM) × FAF (1.30) × GST (1.15)",
+      "note":    "Use for palletised bulk freight. Generally cheapest per-m³ for orders >0.3m³. Min charge applies to small consignments."
+    },
     "rates": {
       "ashburton":        {"base": 39, "min": 32,  "per_m3": 32,  "zone_group": "south_island"},
       "auckland":         {"base": 48, "min": 48,  "per_m3": 73,  "zone_group": "north_island"},
@@ -66,6 +111,45 @@
       "wellington":       {"base": 45, "min": 45,  "per_m3": 63,  "zone_group": "north_island"},
       "whakatane":        {"base": 48, "min": 48,  "per_m3": 120, "zone_group": "north_island"},
       "whangarei":        {"base": 48, "min": 48,  "per_m3": 140, "zone_group": "north_island"}
+    }
+  },
+  "kiwi_express": {
+    "_meta": {
+      "label":   "Kiwi Express Oversize",
+      "service": "Oversize 2-3 Day",
+      "vintage": "March 2026 rates",
+      "formula": "MAX(min, base + per_m³ × CBM) — incl. GST + FAF",
+      "note":    "Live quotes returned via GoSweetSpot API. Rate card here is for reference only. Has separate B2B and B2C rates. Real KX Oversize minimum for ChCh local is ~$46 (B2B) or $68 (B2C) — any GSS quote below that is suspicious."
+    },
+    "b2c": {
+      "_note": "Business-to-consumer rates (default for online customers)",
+      "rates": {
+        "christchurch_z1":  {"min": 68.00,  "base": 53.79, "per_m3": 47.38, "zone_group": "local"},
+        "christchurch_z5":  {"min": 95.02,  "base": 66.59, "per_m3": 94.77, "zone_group": "local"},
+        "auckland_z1":      {"min": 115.43, "base": 53.79, "per_m3": 205.48, "zone_group": "north_island"},
+        "auckland_z5":      {"min": 142.45, "base": 66.59, "per_m3": 252.87, "zone_group": "north_island"},
+        "wellington_z1":    {"min": 100.57, "base": 53.79, "per_m3": 155.94, "zone_group": "north_island"},
+        "hamilton_z1":      {"min": 115.43, "base": 53.79, "per_m3": 205.48, "zone_group": "north_island"},
+        "tauranga_z1":      {"min": 117.01, "base": 53.79, "per_m3": 210.75, "zone_group": "north_island"},
+        "dunedin_z1":       {"min": 98.99,  "base": 53.79, "per_m3": 150.67, "zone_group": "south_island"},
+        "nelson_z1":        {"min": 98.99,  "base": 53.79, "per_m3": 150.67, "zone_group": "south_island"},
+        "blenheim_z1":      {"min": 98.99,  "base": 53.79, "per_m3": 150.67, "zone_group": "south_island"},
+        "central_otago_z1": {"min": 98.99,  "base": 53.79, "per_m3": 150.67, "zone_group": "south_island"}
+      }
+    },
+    "b2b": {
+      "_note": "Business-to-business rates (B2B accounts get lower rates)",
+      "rates": {
+        "christchurch_z1":  {"min": 46.42, "base": 33.94, "per_m3": 41.62, "zone_group": "local"},
+        "christchurch_z5":  {"min": 79.85, "base": 53.15, "per_m3": 89.00, "zone_group": "local"},
+        "auckland_z1":      {"min": 87.53, "base": 33.94, "per_m3": 178.64, "zone_group": "north_island"},
+        "auckland_z5":      {"min": 120.95,"base": 53.15, "per_m3": 226.02, "zone_group": "north_island"},
+        "wellington_z1":    {"min": 78.99, "base": 33.94, "per_m3": 150.18, "zone_group": "north_island"},
+        "hamilton_z1":      {"min": 93.85, "base": 33.94, "per_m3": 199.72, "zone_group": "north_island"},
+        "tauranga_z1":      {"min": 95.43, "base": 33.94, "per_m3": 204.99, "zone_group": "north_island"},
+        "dunedin_z1":       {"min": 77.41, "base": 33.94, "per_m3": 144.91, "zone_group": "south_island"},
+        "nelson_z1":        {"min": 77.41, "base": 33.94, "per_m3": 144.91, "zone_group": "south_island"}
+      }
     }
   },
   "city_aliases": {
