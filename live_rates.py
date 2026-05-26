@@ -28,12 +28,13 @@ GSS_SITE_ID    = os.environ.get("GSS_SITE_ID", "")
 GSS_URL        = "https://api.gosweetspot.com/api/rates"
 
 ORIGIN = {
-    "Name": "NED Collections",
+    "Name": "NED Collections Warehouse",
     "Address": {
-        "StreetAddress": os.environ.get("ORIGIN_STREET", "51 Durham Street South"),
-        "Suburb":        os.environ.get("ORIGIN_SUBURB", "Sydenham"),
+        # Warehouse, NOT the showroom. Used as the pickup point for all carrier quotes.
+        "StreetAddress": os.environ.get("ORIGIN_STREET", "7 Paradyne Place"),
+        "Suburb":        os.environ.get("ORIGIN_SUBURB", "Wigram"),
         "City":          os.environ.get("ORIGIN_CITY", "Christchurch"),
-        "PostCode":      os.environ.get("ORIGIN_POSTCODE", "8023"),
+        "PostCode":      os.environ.get("ORIGIN_POSTCODE", "8042"),
         "CountryCode":   os.environ.get("ORIGIN_COUNTRY", "NZ"),
     }
 }
