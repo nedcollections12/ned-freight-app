@@ -171,6 +171,19 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     if not options:
         return None
 
+    # SAFETY FILTER: drop suspiciously low quotes for large items.
+    # GSS sometimes returns Kiwi Express Car-Economy ($13-86) for cube >1m³
+    # which is unlikely to be valid for a sofa-sized parcel. Until confirmed
+    # with the rep, exclude quotes that fail sanity check.
+    cart_cbm = sum(float(p.get("Length", 0)) * float(p.get("Width", 0)) * float(p.get("Height", 0))
+                   for p in payload["Packages"]) / 1_000_000  # cm³ → m³
+    min_sensible_per_m3 = 40  # absolute floor: $40/m³ raw cost
+    filtered = [
+        o for o in options
+        if (o.get("Cost", 0) / GSS_BUILTIN_MARKUP) >= max(8, cart_cbm * min_sensible_per_m3)
+    ]
+    options = filtered if filtered else options  # never strand the cart with zero quotes
+
     # Choose cheapest available option (typically Post Haste 2-Day)
     cheapest = min(options, key=lambda o: o.get("Cost", float("inf")))
     gss_cost = float(cheapest.get("Cost", 0))
