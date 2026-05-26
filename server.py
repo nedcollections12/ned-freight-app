@@ -163,6 +163,99 @@ async def reload_rates():
     live_rates.reload_carrier_rates()
     return {"status": "ok", "message": "Carrier rates reloaded"}
 
+
+# ─── CBM Admin API ─────────────────────────────────────────────────────────────
+# Pulls product weights from Shopify so the UI can browse + edit them.
+# Uses the admin access token stored in env (SHOPIFY_ADMIN_TOKEN) for write
+# operations. If no token configured, returns read-only data via shopify_token.json.
+
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "nedcollections.myshopify.com")
+SHOPIFY_ADMIN_TOKEN = os.environ.get("SHOPIFY_ADMIN_TOKEN", "")
+
+
+def _shopify_headers():
+    """Use SHOPIFY_ADMIN_TOKEN env var, else fall back to OAuth-persisted token."""
+    if SHOPIFY_ADMIN_TOKEN:
+        return {"X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN, "Content-Type": "application/json"}
+    if TOKEN_FILE.exists():
+        data = json.loads(TOKEN_FILE.read_text())
+        return {"X-Shopify-Access-Token": data["token"], "Content-Type": "application/json"}
+    raise HTTPException(401, "No Shopify token configured")
+
+
+@app.get("/api/cbm-list")
+async def cbm_list():
+    """List every active variant with current weight (= CBM in kg-equivalent)."""
+    headers = _shopify_headers()
+    gql_url = f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json"
+    query = """
+    query($cursor: String) {
+      productVariants(first: 250, after: $cursor, query: "status:ACTIVE") {
+        edges { node {
+          id sku title
+          product { id title productType }
+          inventoryItem { id measurement { weight { value } } }
+        }}
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    """
+    all_v = []
+    cursor = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            r = await client.post(gql_url, headers=headers, json={"query": query, "variables": {"cursor": cursor}})
+            data = r.json()
+            for e in data["data"]["productVariants"]["edges"]:
+                v = e["node"]
+                w = v["inventoryItem"]["measurement"]["weight"]
+                all_v.append({
+                    "variant_id":   v["id"],
+                    "inv_id":       v["inventoryItem"]["id"],
+                    "product":      v["product"]["title"],
+                    "variant":      v["title"],
+                    "sku":          v["sku"] or "",
+                    "category":     v["product"].get("productType") or "",
+                    "cbm":          (w["value"] if w else 0) or 0,
+                })
+            if not data["data"]["productVariants"]["pageInfo"]["hasNextPage"]:
+                break
+            cursor = data["data"]["productVariants"]["pageInfo"]["endCursor"]
+    return {"variants": all_v, "count": len(all_v)}
+
+
+@app.put("/api/cbm")
+async def cbm_update(request: Request):
+    """Update one variant's weight (CBM in kg). Body: {inv_id, cbm}."""
+    body = await request.json()
+    inv_id = body.get("inv_id")
+    cbm = body.get("cbm")
+    if not inv_id or cbm is None:
+        raise HTTPException(400, "Required: inv_id, cbm")
+    cbm = max(float(cbm), 0.0001)  # Shopify rounds <0.001 to 0
+    headers = _shopify_headers()
+    gql_url = f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json"
+    mutation = """
+    mutation($id: ID!, $input: InventoryItemInput!) {
+      inventoryItemUpdate(id: $id, input: $input) {
+        inventoryItem { id measurement { weight { value } } }
+        userErrors { field message }
+      }
+    }
+    """
+    variables = {
+        "id": inv_id,
+        "input": {"measurement": {"weight": {"value": cbm, "unit": "KILOGRAMS"}}}
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(gql_url, headers=headers, json={"query": mutation, "variables": variables})
+    data = r.json()
+    errors = (data.get("data") or {}).get("inventoryItemUpdate", {}).get("userErrors", [])
+    if errors:
+        raise HTTPException(400, str(errors))
+    actual = data["data"]["inventoryItemUpdate"]["inventoryItem"]["measurement"]["weight"]["value"]
+    return {"status": "ok", "cbm": actual}
+
 @app.get("/api/rates")
 async def get_rates(): return load_rates()
 

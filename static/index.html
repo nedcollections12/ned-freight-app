@@ -3,531 +3,448 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NED Freight Admin</title>
+<title>NED Freight</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f6f7f9; color: #1a1a1a; font-size: 14px; }
+  header { background: #1a1a1a; color: #fff; padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.3px; }
+  header .badge { font-size: 11px; padding: 3px 8px; border-radius: 10px; background: rgba(255,255,255,0.15); }
 
-  header { background: #1a1a1a; color: #fff; padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
-  header h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.5px; }
-  header span { font-size: 13px; opacity: 0.5; }
-
-  nav { background: #fff; border-bottom: 1px solid #e5e5e5; padding: 0 24px; display: flex; gap: 0; }
-  nav button { background: none; border: none; padding: 14px 18px; font-size: 14px; color: #666; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+  nav { background: #fff; border-bottom: 1px solid #e5e7eb; padding: 0 24px; display: flex; gap: 0; }
+  nav button { background: none; border: none; padding: 14px 18px; font-size: 14px; color: #6b7280; cursor: pointer; border-bottom: 2px solid transparent; }
   nav button:hover { color: #1a1a1a; }
   nav button.active { color: #1a1a1a; border-bottom-color: #1a1a1a; font-weight: 500; }
 
-  main { padding: 24px; max-width: 1200px; margin: 0 auto; }
-
+  main { padding: 20px 24px 60px; max-width: 1400px; margin: 0 auto; }
   .tab { display: none; }
   .tab.active { display: block; }
 
-  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
-  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
-  .card p.hint { font-size: 13px; color: #888; margin-bottom: 16px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px 20px; margin-bottom: 18px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  .card p.hint { font-size: 13px; color: #6b7280; margin-bottom: 14px; }
 
-  /* Tables */
-  .table-wrap { overflow-x: auto; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .row input, .row select { padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
+  .row input[type=search] { flex: 1; min-width: 200px; }
+
+  .stat-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat { background: #fff; padding: 12px 16px; border: 1px solid #e5e7eb; border-radius: 8px; min-width: 140px; }
+  .stat .label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat .val { font-size: 22px; font-weight: 600; margin-top: 2px; }
+
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th { background: #f8f8f8; font-weight: 600; padding: 8px 10px; text-align: left; white-space: nowrap; border: 1px solid #e5e5e5; }
-  td { padding: 4px 6px; border: 1px solid #e5e5e5; }
-  td.zone-name { font-weight: 500; padding: 6px 10px; background: #fafafa; white-space: nowrap; }
-  td input[type=number] { width: 68px; border: 1px solid #ddd; border-radius: 4px; padding: 4px 6px; font-size: 13px; text-align: right; }
-  td input[type=number]:focus { outline: none; border-color: #1a1a1a; }
-  td input[type=number].null-val { background: #f8f8f8; color: #bbb; }
+  th { background: #f3f4f6; font-weight: 600; padding: 10px 12px; text-align: left; white-space: nowrap; border-bottom: 1px solid #e5e7eb; position: sticky; top: 0; }
+  td { padding: 8px 12px; border-bottom: 1px solid #f3f4f6; }
+  tr:hover td { background: #fafbfc; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td input.cbm-input { width: 90px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px; text-align: right; }
+  td input.cbm-input:focus { outline: none; border-color: #1a1a1a; }
+  td input.cbm-input.changed { background: #fef3c7; border-color: #f59e0b; }
+  td input.cbm-input.saving { background: #dbeafe; }
+  td input.cbm-input.saved { background: #d1fae5; border-color: #10b981; }
+  td input.cbm-input.error { background: #fee2e2; border-color: #ef4444; }
 
-  /* Settings */
-  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
-  .field { display: flex; flex-direction: column; gap: 6px; }
-  .field label { font-size: 13px; font-weight: 500; }
-  .field input { border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
-  .field input:focus { outline: none; border-color: #1a1a1a; }
-  .field small { font-size: 12px; color: #888; }
-
-  /* Buttons */
-  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 18px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; }
-  .btn-primary { background: #1a1a1a; color: #fff; }
+  .btn { padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid; }
+  .btn-primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
   .btn-primary:hover { background: #333; }
-  .btn-secondary { background: #fff; color: #1a1a1a; border: 1px solid #ddd; }
-  .btn-secondary:hover { background: #f5f5f5; }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary { background: #fff; color: #374151; border-color: #d1d5db; }
+  .btn-secondary:hover { background: #f9fafb; }
 
-  .actions { margin-top: 16px; display: flex; gap: 10px; align-items: center; }
+  .quote-result { background: #f3f4f6; padding: 14px; border-radius: 6px; margin-top: 14px; }
+  .quote-result .price { font-size: 24px; font-weight: 600; color: #1a1a1a; }
+  .quote-result .desc { font-size: 13px; color: #6b7280; margin-top: 4px; }
+  .quote-result table { background: #fff; margin-top: 10px; }
 
-  /* Upload */
-  .upload-zone { border: 2px dashed #ddd; border-radius: 8px; padding: 32px; text-align: center; cursor: pointer; transition: border-color 0.15s; }
-  .upload-zone:hover, .upload-zone.drag { border-color: #1a1a1a; }
-  .upload-zone p { font-size: 14px; color: #666; margin-top: 8px; }
-  .upload-zone strong { font-size: 15px; }
-  input[type=file] { display: none; }
-  .radio-group { display: flex; gap: 16px; margin-bottom: 16px; }
-  .radio-group label { display: flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+  /* Docs */
+  .docs h3 { font-size: 16px; font-weight: 600; margin: 22px 0 8px; color: #1a1a1a; }
+  .docs h4 { font-size: 14px; font-weight: 600; margin: 16px 0 6px; color: #374151; }
+  .docs p { margin: 8px 0; line-height: 1.55; color: #374151; }
+  .docs ul { margin: 8px 0 8px 22px; }
+  .docs li { line-height: 1.55; margin: 3px 0; color: #374151; }
+  .docs code { background: #f3f4f6; padding: 1px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, monospace; font-size: 12.5px; }
+  .docs pre { background: #1a1a1a; color: #e5e7eb; padding: 12px 14px; border-radius: 6px; margin: 10px 0; overflow-x: auto; font-family: 'SF Mono', Monaco, monospace; font-size: 12.5px; line-height: 1.5; }
+  .docs .flow { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; margin: 12px 0; font-family: 'SF Mono', Monaco, monospace; font-size: 12.5px; white-space: pre; line-height: 1.55; }
+  .docs .callout { border-left: 3px solid #f59e0b; background: #fffbeb; padding: 10px 14px; margin: 12px 0; border-radius: 4px; font-size: 13px; color: #92400e; }
 
-  /* Test rate */
-  .test-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .result-box { background: #f8f8f8; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; margin-top: 16px; font-size: 14px; display: none; }
-  .result-box.show { display: block; }
-  .result-box .result-rate { font-size: 28px; font-weight: 700; color: #1a1a1a; margin: 8px 0; }
-  .result-box .result-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 12px; }
-  .result-box .result-meta span { font-size: 12px; color: #888; }
-  .result-box .result-meta strong { font-size: 13px; }
-
-  /* Toast */
-  #toast { position: fixed; bottom: 24px; right: 24px; background: #1a1a1a; color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transform: translateY(8px); transition: all 0.2s; pointer-events: none; z-index: 999; }
-  #toast.show { opacity: 1; transform: translateY(0); }
-  #toast.error { background: #c0392b; }
-
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; background: #e8f5e9; color: #2e7d32; margin-left: 8px; }
-  .badge.red { background: #fdecea; color: #c62828; }
+  .loading { padding: 40px; text-align: center; color: #6b7280; }
+  .source-pill { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; }
+  .src-cin7 { background: #dbeafe; color: #1e40af; }
+  .src-desc { background: #fef3c7; color: #92400e; }
+  .src-default { background: #f3f4f6; color: #6b7280; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>NED Freight Admin</h1>
-  <span>nedcollections.myshopify.com</span>
+  <h1>NED Freight</h1>
+  <span class="badge">Live carrier rates</span>
 </header>
 
 <nav>
-  <button class="active" onclick="showTab('standard')">Standard Rates</button>
-  <button onclick="showTab('oversized')">Oversized Rates</button>
-  <button onclick="showTab('settings')">Settings</button>
-  <button onclick="showTab('upload')">Upload CSV/Excel</button>
-  <button onclick="showTab('tester')">Rate Tester</button>
-  <button onclick="showTab('sync')">Shopify Sync</button>
+  <button class="active" data-tab="cbm">Product CBMs</button>
+  <button data-tab="tester">Test a quote</button>
+  <button data-tab="docs">How it works</button>
 </nav>
 
 <main>
-
-  <!-- STANDARD RATES -->
-  <div id="tab-standard" class="tab active">
+  <!-- TAB 1: CBM Admin -->
+  <section class="tab active" id="tab-cbm">
     <div class="card">
-      <h2>Standard Freight Rates <span style="font-weight:400;color:#888;font-size:13px;">— by zone and order value</span></h2>
-      <p class="hint">Rates in NZD (excl. rural surcharge). Leave blank or set to 0 for "Contact Us" (by_request zones are fixed).</p>
-      <div class="table-wrap" id="standard-table-wrap">Loading…</div>
-      <div class="actions">
-        <button class="btn btn-primary" onclick="saveRates()">Save Changes</button>
-        <span id="std-status" style="font-size:13px;color:#888;"></span>
+      <h2>Product CBMs</h2>
+      <p class="hint">Edit any product's CBM. Changes save to Shopify on blur (click away from the field). Yellow = unsaved, green = saved, red = error.</p>
+      <div class="row" style="margin-bottom: 12px;">
+        <input type="search" id="search" placeholder="Search by product, SKU, or category…">
+        <select id="filter-category"><option value="">All categories</option></select>
+        <select id="filter-size">
+          <option value="">All sizes</option>
+          <option value="tiny">Tiny (≤0.05m³)</option>
+          <option value="small">Small (0.05–0.5)</option>
+          <option value="medium">Medium (0.5–1.5)</option>
+          <option value="large">Large (>1.5)</option>
+          <option value="zero">⚠️ 0kg (no weight)</option>
+        </select>
+        <button class="btn btn-secondary" onclick="loadCbm(true)">Refresh from Shopify</button>
+      </div>
+
+      <div class="stat-row" id="stats"></div>
+
+      <div id="table-wrap" class="loading">Loading product list…</div>
+    </div>
+  </section>
+
+  <!-- TAB 2: Quote Tester -->
+  <section class="tab" id="tab-tester">
+    <div class="card">
+      <h2>Test a quote</h2>
+      <p class="hint">Simulate a customer at checkout. See the rate NED Freight would return.</p>
+      <div class="row">
+        <input type="text" id="qt-city" placeholder="Destination city (e.g. Auckland)" value="Auckland" style="width:200px;">
+        <input type="text" id="qt-postcode" placeholder="Postcode" value="1010" style="width:120px;">
+        <input type="text" id="qt-address" placeholder="Street address" value="1 Queen St" style="width:240px;">
+        <input type="number" step="0.001" id="qt-cbm" placeholder="Total CBM (m³)" value="0.5" style="width:120px;">
+        <input type="number" id="qt-qty" placeholder="Qty" value="1" style="width:80px;">
+        <button class="btn btn-primary" onclick="runQuote()">Get quote</button>
+      </div>
+      <div id="quote-output"></div>
+    </div>
+  </section>
+
+  <!-- TAB 3: Docs -->
+  <section class="tab docs" id="tab-docs">
+    <div class="card">
+      <h2>How NED Freight works</h2>
+      <p class="hint">Live carrier-rate calculator wired into Shopify checkout.</p>
+
+      <h3>What it does</h3>
+      <p>At checkout, NED Freight queries three carriers in real-time (Castle Parcels/Post Haste via GoSweetSpot, plus Mainfreight and Dailyfreight from rate cards), picks the cheapest, applies a markup, and returns a single shipping rate to Shopify.</p>
+
+      <h3>The flow</h3>
+      <div class="flow">Customer enters address at checkout
+   ↓
+Shopify POSTs cart + destination → /shopify/rates
+   ↓
+NED Freight builds packages from each item's weight (= CBM in kg)
+   ↓
+Query Castle Parcels (live) ─┐
+Calculate Mainfreight (formula) ─┼─→ Pick cheapest
+Calculate Dailyfreight (formula) ─┘
+   ↓
+Apply NED markup (10%)
+   ↓
+Return "Standard Delivery — $X" to Shopify
+   ↓
+Customer sees one clean shipping option</div>
+
+      <h3>Pricing logic</h3>
+      <p><b>Per-carrier raw cost</b> (NED's actual cost to ship):</p>
+      <ul>
+        <li><b>Castle Parcels / Post Haste</b> — Live quote from GoSweetSpot API. Strip 8% GSS markup → true NED cost (incl. FAF + GST).</li>
+        <li><b>Mainfreight</b> — <code>MAX(min, base + per_m³ × cart_CBM) × FAF × GST</code></li>
+        <li><b>Dailyfreight</b> — <code>MAX(min, per_m³ × cart_CBM) × FAF × GST</code></li>
+      </ul>
+      <p><b>Customer price</b> = cheapest raw cost × <code>1.10</code> (NED markup).</p>
+
+      <h3>Where CBM data lives</h3>
+      <p>Every Shopify product variant has a <code>weight</code> field. We use <b>weight = CBM (in kg-equivalent)</b>, so a 1m³ product has a weight of 1.0kg. Carriers price on cube anyway, so the conversion is transparent.</p>
+      <p>Sources, in order of authority:</p>
+      <ul>
+        <li>Cin7 Option Cubic Meters (per-variant — most accurate)</li>
+        <li>Cin7 product-level Cubic Meters (fallback)</li>
+        <li>Parsed from product description (e.g. "120cm l x 38cm w x 45cm h")</li>
+        <li>Category default (e.g. all vases = 0.008m³)</li>
+      </ul>
+      <p>Use the <b>Product CBMs</b> tab to edit any variant — changes sync to Shopify immediately.</p>
+
+      <h3>Free shipping</h3>
+      <p>Currently <b>disabled</b> for trial. Set <code>FREE_SHIPPING_THRESHOLD</code> env var to a real dollar value (e.g. <code>500</code>) to enable free shipping over $500.</p>
+
+      <h3>Configuration</h3>
+      <p>Env vars (set in Render dashboard):</p>
+      <ul>
+        <li><code>GSS_ACCESS_KEY</code>, <code>GSS_SITE_ID</code> — GoSweetSpot API auth</li>
+        <li><code>SHOPIFY_STORE</code>, <code>SHOPIFY_ADMIN_TOKEN</code> — for CBM admin UI</li>
+        <li><code>FAF_MULTIPLIER</code> (default 1.30 = 30% fuel adjustment)</li>
+        <li><code>GST_MULTIPLIER</code> (default 1.15 = 15% NZ GST)</li>
+        <li><code>NED_MARKUP</code> (default 1.10 = 10% NED margin)</li>
+        <li><code>FREE_SHIPPING_THRESHOLD</code> (default 999999 = effectively off)</li>
+        <li><code>ORIGIN_*</code> — warehouse address (7 Paradyne Pl, Wigram, ChCh 8042)</li>
+      </ul>
+
+      <h3>Endpoints</h3>
+      <ul>
+        <li><code>POST /shopify/rates</code> — Shopify carrier service callback (production)</li>
+        <li><code>POST /shopify/rates/debug</code> — Same, but returns all carrier quotes for diagnosis</li>
+        <li><code>GET /api/quote?city=X&cbm=Y&qty=Z</code> — Quick test endpoint</li>
+        <li><code>GET /api/cbm-list</code> — All variants + current CBM</li>
+        <li><code>PUT /api/cbm</code> — Update one variant's CBM</li>
+        <li><code>POST /api/reload-rates</code> — Hot-reload carrier_rates.json</li>
+      </ul>
+
+      <h3>Maintenance tasks</h3>
+      <h4>When FAF or GST changes</h4>
+      <p>Update <code>FAF_MULTIPLIER</code> in Render env vars and redeploy. No code change needed.</p>
+
+      <h4>When Mainfreight/Dailyfreight rates change</h4>
+      <p>Edit <code>data/carrier_rates.json</code> in the repo, commit + push. Or POST to <code>/api/reload-rates</code> after editing on the server.</p>
+
+      <h4>When a customer disputes a freight charge</h4>
+      <p>Use the <b>Test a quote</b> tab — enter their address and cart CBM, see all three carriers' quotes and which one was picked. Compare with their actual carrier invoice.</p>
+
+      <h4>If GoSweetSpot returns odd cheap quotes</h4>
+      <p>The endpoint has a safety filter: any quote below <code>max($8, cart_cbm × $40/m³)</code> is dropped. Adjust in <code>live_rates.py</code> if needed.</p>
+
+      <div class="callout">
+        <b>Known limitation:</b> The cube method (deriving package dimensions from weight) assumes products are cube-shaped. Real boxes are rectangular, so for items priced on dimensional weight, our quotes can be ~5-10% higher than the absolute optimum. For pure volumetric pricing (all our carriers), it's exact.
       </div>
     </div>
-  </div>
-
-  <!-- OVERSIZED RATES -->
-  <div id="tab-oversized" class="tab">
-    <div class="card">
-      <h2>Oversized Freight Rates <span style="font-weight:400;color:#888;font-size:13px;">— by zone and cubic metres</span></h2>
-      <p class="hint">Applied when any item in the order has CBM &gt; 0.160 m³. Rates in NZD.</p>
-      <div class="table-wrap" id="oversized-table-wrap">Loading…</div>
-      <div class="actions">
-        <button class="btn btn-primary" onclick="saveRates()">Save Changes</button>
-        <span id="oz-status" style="font-size:13px;color:#888;"></span>
-      </div>
-    </div>
-  </div>
-
-  <!-- SETTINGS -->
-  <div id="tab-settings" class="tab">
-    <div class="card">
-      <h2>Settings</h2>
-      <p class="hint">Global freight settings applied to all orders.</p>
-      <div class="settings-grid">
-        <div class="field">
-          <label>Free Freight Threshold (NZD)</label>
-          <input type="number" id="s-threshold" step="50" min="0">
-          <small>Orders at or above this value get free freight.</small>
-        </div>
-        <div class="field">
-          <label>Rural Surcharge (NZD)</label>
-          <input type="number" id="s-rural" step="1" min="0">
-          <small>Added when customer enters "Rural" in address line 2.</small>
-        </div>
-        <div class="field">
-          <label>Currency</label>
-          <input type="text" id="s-currency" maxlength="3" style="text-transform:uppercase;">
-          <small>ISO currency code, e.g. NZD.</small>
-        </div>
-      </div>
-      <div class="actions">
-        <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- UPLOAD -->
-  <div id="tab-upload" class="tab">
-    <div class="card">
-      <h2>Upload Rates File</h2>
-      <p class="hint">Upload a CSV or Excel (.xlsx) file to bulk-update rates. First column = zone ID, next 10 columns = rates for each tier/category.</p>
-
-      <div class="radio-group">
-        <label><input type="radio" name="upload-type" value="standard" checked> Standard rates</label>
-        <label><input type="radio" name="upload-type" value="oversized"> Oversized rates</label>
-      </div>
-
-      <div class="upload-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
-        <strong>Click to choose a file</strong>
-        <p>or drag and drop a .csv or .xlsx here</p>
-        <p id="chosen-file" style="margin-top:8px;color:#1a1a1a;font-weight:500;"></p>
-      </div>
-      <input type="file" id="file-input" accept=".csv,.xlsx,.xls" onchange="onFileChosen(this)">
-
-      <div class="actions">
-        <button class="btn btn-primary" onclick="uploadFile()" id="upload-btn" disabled>Upload File</button>
-      </div>
-      <div id="upload-result" style="margin-top:16px;font-size:13px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>File Format</h2>
-      <p class="hint">Example layout (standard rates). Zone IDs must match exactly.</p>
-      <div class="table-wrap">
-        <table>
-          <tr><th>zone_id</th><th>$0–150</th><th>$151–300</th><th>$301–500</th><th>… (10 cols total)</th></tr>
-          <tr><td class="zone-name">chch_local</td><td>5</td><td>8</td><td>13</td><td>…</td></tr>
-          <tr><td class="zone-name">outer_cant</td><td>8</td><td>12</td><td>18</td><td>…</td></tr>
-          <tr><td class="zone-name">far_north</td><td></td><td></td><td></td><td>(blank = by request)</td></tr>
-        </table>
-      </div>
-      <p style="margin-top:12px;font-size:13px;color:#888;">Oversized zone IDs: <code>oz_chch, oz_si, oz_ni_lower, oz_waikato, oz_bop_gis, oz_taranaki, oz_ni_upper, oz_far_north</code></p>
-    </div>
-  </div>
-
-  <!-- SHOPIFY SYNC -->
-  <div id="tab-sync" class="tab">
-    <div class="card">
-      <h2>Sync Oversized Zones to Shopify</h2>
-      <p class="hint">Pushes regional flat rates into all Shopify profiles named "Oversized Products …". Replaces any existing broad NZ zone with 7 regional zones based on your Oversized Rates table (using the starting CBM tier).</p>
-
-      <table style="font-size:13px;width:100%;margin-bottom:16px;">
-        <thead><tr><th style="text-align:left;padding:6px 10px;background:#f8f8f8;border:1px solid #e5e5e5;">Shopify Zone</th><th style="text-align:left;padding:6px 10px;background:#f8f8f8;border:1px solid #e5e5e5;">NZ Regions covered</th><th style="text-align:right;padding:6px 10px;background:#f8f8f8;border:1px solid #e5e5e5;">Base rate</th></tr></thead>
-        <tbody id="sync-preview"></tbody>
-      </table>
-
-      <p style="font-size:12px;color:#888;margin-bottom:16px;">⚠️ Far North is excluded (marked "By Request" in your rates — customers should contact you).</p>
-
-      <button class="btn btn-primary" onclick="runSync()" id="sync-btn">Sync Zones to Shopify</button>
-      <div id="sync-result" style="margin-top:16px;font-size:13px;"></div>
-    </div>
-  </div>
-
-  <!-- RATE TESTER -->
-  <div id="tab-tester" class="tab">
-    <div class="card">
-      <h2>Rate Tester</h2>
-      <p class="hint">Simulate what freight rate Shopify would return for a given order.</p>
-      <div class="test-grid">
-        <div class="field">
-          <label>City</label>
-          <input type="text" id="t-city" placeholder="e.g. Christchurch">
-        </div>
-        <div class="field">
-          <label>Postcode</label>
-          <input type="text" id="t-postcode" placeholder="e.g. 8011">
-        </div>
-        <div class="field">
-          <label>Province / Region</label>
-          <input type="text" id="t-province" placeholder="e.g. Canterbury">
-        </div>
-        <div class="field">
-          <label>Order Value (NZD)</label>
-          <input type="number" id="t-value" placeholder="e.g. 450" min="0" step="1">
-        </div>
-        <div class="field">
-          <label>Total CBM (oversized items only)</label>
-          <input type="number" id="t-cbm" placeholder="e.g. 0.35" min="0" step="0.01">
-        </div>
-        <div class="field" style="justify-content:flex-end;">
-          <label style="flex-direction:row;align-items:center;gap:8px;font-weight:400;">
-            <input type="checkbox" id="t-rural"> Rural delivery
-          </label>
-        </div>
-      </div>
-      <button class="btn btn-primary" onclick="testRate()">Calculate Rate</button>
-
-      <div class="result-box" id="result-box">
-        <div style="font-size:13px;color:#888;" id="result-service"></div>
-        <div class="result-rate" id="result-rate"></div>
-        <div class="result-meta" id="result-meta"></div>
-      </div>
-    </div>
-  </div>
-
+  </section>
 </main>
 
-<div id="toast"></div>
-
 <script>
-let ratesData = null;
+let allVariants = [];
+const STATE = { sort: 'product', sortDir: 1 };
 
-// ── Navigation ───────────────────────────────────────────────
-function showTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  event.target.classList.add('active');
-}
-
-// ── Toast ────────────────────────────────────────────────────
-function toast(msg, isError = false) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'show' + (isError ? ' error' : '');
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => t.className = '', 3000);
-}
-
-// ── Load data ────────────────────────────────────────────────
-async function loadAll() {
-  const res = await fetch('/api/rates');
-  ratesData = await res.json();
-  renderStandard();
-  renderOversized();
-  renderSettings();
-}
-
-// ── Standard rates table ─────────────────────────────────────
-function renderStandard() {
-  const { tiers, zones, rates } = ratesData.standard;
-  let html = '<table><thead><tr><th>Zone</th>';
-  tiers.forEach(t => html += `<th>${t.label}</th>`);
-  html += '</tr></thead><tbody>';
-  zones.forEach(z => {
-    const byReq = z.by_request;
-    html += `<tr><td class="zone-name">${z.name}${byReq ? ' <span class="badge red">By Request</span>' : ''}</td>`;
-    const zr = rates[z.id] || [];
-    tiers.forEach((_, i) => {
-      const val = zr[i];
-      if (byReq) {
-        html += `<td><input type="number" class="null-val" value="" placeholder="—" data-type="standard" data-zone="${z.id}" data-idx="${i}" disabled></td>`;
-      } else {
-        html += `<td><input type="number" value="${val !== null && val !== undefined ? val : ''}" placeholder="—" min="0" step="1" data-type="standard" data-zone="${z.id}" data-idx="${i}" onchange="markChanged()"></td>`;
-      }
-    });
-    html += '</tr>';
+// Tab switching
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'cbm' && allVariants.length === 0) loadCbm();
   });
-  html += '</tbody></table>';
-  document.getElementById('standard-table-wrap').innerHTML = html;
-}
-
-// ── Oversized rates table ────────────────────────────────────
-function renderOversized() {
-  const { categories, zones, rates } = ratesData.oversized;
-  let html = '<table><thead><tr><th>Zone</th>';
-  categories.forEach(c => html += `<th>${c.label}</th>`);
-  html += '</tr></thead><tbody>';
-  zones.forEach(z => {
-    const byReq = z.by_request;
-    html += `<tr><td class="zone-name">${z.name}${byReq ? ' <span class="badge red">By Request</span>' : ''}</td>`;
-    const zr = rates[z.id] || [];
-    categories.forEach((_, i) => {
-      const val = zr[i];
-      if (byReq) {
-        html += `<td><input type="number" class="null-val" value="" placeholder="—" data-type="oversized" data-zone="${z.id}" data-idx="${i}" disabled></td>`;
-      } else {
-        html += `<td><input type="number" value="${val !== null && val !== undefined ? val : ''}" placeholder="—" min="0" step="1" data-type="oversized" data-zone="${z.id}" data-idx="${i}" onchange="markChanged()"></td>`;
-      }
-    });
-    html += '</tr>';
-  });
-  html += '</tbody></table>';
-  document.getElementById('oversized-table-wrap').innerHTML = html;
-}
-
-// ── Settings ─────────────────────────────────────────────────
-function renderSettings() {
-  const s = ratesData.settings;
-  document.getElementById('s-threshold').value = s.free_freight_threshold ?? 7500;
-  document.getElementById('s-rural').value = s.rural_surcharge ?? 14;
-  document.getElementById('s-currency').value = s.currency ?? 'NZD';
-}
-
-function markChanged() {
-  document.getElementById('std-status').textContent = '● Unsaved changes';
-  document.getElementById('oz-status').textContent = '● Unsaved changes';
-}
-
-// ── Save rates ───────────────────────────────────────────────
-function collectRates() {
-  // Collect all inputs back into ratesData
-  document.querySelectorAll('input[data-type]').forEach(inp => {
-    const { type, zone, idx } = inp.dataset;
-    const i = parseInt(idx);
-    const val = inp.value.trim();
-    ratesData[type].rates[zone][i] = val === '' ? null : parseFloat(val);
-  });
-}
-
-async function saveRates() {
-  collectRates();
-  const res = await fetch('/api/rates', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(ratesData)
-  });
-  if (res.ok) {
-    toast('Rates saved ✓');
-    document.getElementById('std-status').textContent = '';
-    document.getElementById('oz-status').textContent = '';
-  } else {
-    toast('Save failed', true);
-  }
-}
-
-async function saveSettings() {
-  const body = {
-    free_freight_threshold: parseFloat(document.getElementById('s-threshold').value),
-    rural_surcharge: parseFloat(document.getElementById('s-rural').value),
-    currency: document.getElementById('s-currency').value.toUpperCase()
-  };
-  const res = await fetch('/api/settings', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (res.ok) { toast('Settings saved ✓'); ratesData.settings = { ...ratesData.settings, ...body }; }
-  else toast('Save failed', true);
-}
-
-// ── Upload ───────────────────────────────────────────────────
-let chosenFile = null;
-
-function onFileChosen(input) {
-  chosenFile = input.files[0];
-  document.getElementById('chosen-file').textContent = chosenFile ? chosenFile.name : '';
-  document.getElementById('upload-btn').disabled = !chosenFile;
-}
-
-const dz = document.getElementById('drop-zone');
-dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
-dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
-dz.addEventListener('drop', e => {
-  e.preventDefault(); dz.classList.remove('drag');
-  const f = e.dataTransfer.files[0];
-  if (f) { chosenFile = f; document.getElementById('chosen-file').textContent = f.name; document.getElementById('upload-btn').disabled = false; }
 });
 
-async function uploadFile() {
-  if (!chosenFile) return;
-  const type = document.querySelector('input[name="upload-type"]:checked').value;
-  const fd = new FormData();
-  fd.append('file', chosenFile);
-  document.getElementById('upload-btn').disabled = true;
-  const res = await fetch(`/api/upload/${type}`, { method: 'POST', body: fd });
-  const data = await res.json();
-  document.getElementById('upload-btn').disabled = false;
-  const el = document.getElementById('upload-result');
-  if (res.ok) {
-    el.innerHTML = `<span style="color:#2e7d32">✓ Updated zones: ${data.updated_zones.join(', ') || 'none'}</span>`
-      + (data.errors.length ? `<br><span style="color:#c62828">Errors: ${data.errors.join('; ')}</span>` : '');
-    toast('Upload complete ✓');
-    await loadAll(); // refresh tables
-  } else {
-    el.innerHTML = `<span style="color:#c62828">Upload failed: ${JSON.stringify(data)}</span>`;
-    toast('Upload failed', true);
+// CBM admin
+async function loadCbm(force = false) {
+  const wrap = document.getElementById('table-wrap');
+  wrap.className = 'loading';
+  wrap.textContent = 'Loading product list from Shopify…';
+  try {
+    const r = await fetch('/api/cbm-list');
+    const data = await r.json();
+    allVariants = data.variants;
+    populateCategoryFilter();
+    renderTable();
+  } catch (e) {
+    wrap.textContent = 'Failed to load: ' + e.message;
   }
 }
 
-// ── Rate tester ──────────────────────────────────────────────
-async function testRate() {
-  const params = new URLSearchParams({
-    city: document.getElementById('t-city').value,
-    postcode: document.getElementById('t-postcode').value,
-    province: document.getElementById('t-province').value,
-    order_value: document.getElementById('t-value').value || 0,
-    cbm: document.getElementById('t-cbm').value || 0,
-    is_rural: document.getElementById('t-rural').checked
+function populateCategoryFilter() {
+  const cats = [...new Set(allVariants.map(v => v.category).filter(Boolean))].sort();
+  const sel = document.getElementById('filter-category');
+  sel.innerHTML = '<option value="">All categories</option>' + cats.map(c => `<option>${escapeHtml(c)}</option>`).join('');
+}
+
+function renderTable() {
+  const q = (document.getElementById('search').value || '').trim().toLowerCase();
+  const cat = document.getElementById('filter-category').value;
+  const size = document.getElementById('filter-size').value;
+
+  let rows = allVariants;
+  if (q) rows = rows.filter(v =>
+    (v.product || '').toLowerCase().includes(q) ||
+    (v.variant || '').toLowerCase().includes(q) ||
+    (v.sku || '').toLowerCase().includes(q) ||
+    (v.category || '').toLowerCase().includes(q)
+  );
+  if (cat) rows = rows.filter(v => v.category === cat);
+  if (size) {
+    rows = rows.filter(v => {
+      const c = v.cbm || 0;
+      if (size === 'zero') return c === 0;
+      if (size === 'tiny') return c > 0 && c <= 0.05;
+      if (size === 'small') return c > 0.05 && c <= 0.5;
+      if (size === 'medium') return c > 0.5 && c <= 1.5;
+      if (size === 'large') return c > 1.5;
+    });
+  }
+
+  // Stats
+  const stats = document.getElementById('stats');
+  const total = rows.length;
+  const zero = rows.filter(r => !r.cbm).length;
+  const totalCbm = rows.reduce((s, r) => s + (r.cbm || 0), 0);
+  stats.innerHTML = `
+    <div class="stat"><div class="label">Variants shown</div><div class="val">${total}</div></div>
+    <div class="stat"><div class="label">Zero CBM</div><div class="val">${zero}</div></div>
+    <div class="stat"><div class="label">Total CBM</div><div class="val">${totalCbm.toFixed(2)}m³</div></div>
+  `;
+
+  // Sort
+  rows.sort((a, b) => {
+    const A = (a[STATE.sort] || '') + '', B = (b[STATE.sort] || '') + '';
+    return A.localeCompare(B, undefined, { numeric: true }) * STATE.sortDir;
   });
-  const res = await fetch('/api/test-rate?' + params);
-  const d = await res.json();
-  const box = document.getElementById('result-box');
-  box.classList.add('show');
 
-  const charge = d.freight_charge;
-  const svc = d.service;
-  document.getElementById('result-service').textContent = svc === 'FREE' ? 'Free Freight' : svc === 'OVERSIZED' ? 'Oversized Freight' : 'Standard Freight';
-  document.getElementById('result-rate').textContent = charge === null ? 'Contact Us' : charge === 0 ? 'FREE' : `$${charge.toFixed(2)} NZD`;
+  const wrap = document.getElementById('table-wrap');
+  wrap.className = '';
 
-  document.getElementById('result-meta').innerHTML = `
-    <div><span>Zone</span><br><strong>${d.zone}</strong></div>
-    <div><span>Oversized zone</span><br><strong>${d.oz_zone}</strong></div>
-    <div><span>Order value</span><br><strong>$${parseFloat(d.order_value).toFixed(2)}</strong></div>
-    <div><span>CBM</span><br><strong>${d.cbm}</strong></div>
-    <div><span>Base rate</span><br><strong>${d.base_rate !== undefined && d.base_rate !== null ? '$' + d.base_rate : '—'}</strong></div>
-    <div><span>Rural</span><br><strong>${d.is_rural ? 'Yes' : 'No'}</strong></div>
+  if (rows.length === 0) {
+    wrap.innerHTML = '<div class="loading">No products match your filters.</div>';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th onclick="setSort('product')">Product</th>
+          <th onclick="setSort('variant')">Variant</th>
+          <th onclick="setSort('sku')">SKU</th>
+          <th onclick="setSort('category')">Category</th>
+          <th onclick="setSort('cbm')" style="text-align:right;">CBM (m³)</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(v => `
+          <tr>
+            <td>${escapeHtml(v.product)}</td>
+            <td>${escapeHtml(v.variant)}</td>
+            <td><code style="font-size:11px">${escapeHtml(v.sku)}</code></td>
+            <td>${escapeHtml(v.category)}</td>
+            <td class="num">
+              <input type="number" step="0.0001" class="cbm-input"
+                     value="${(v.cbm || 0).toFixed(4)}"
+                     data-inv="${v.inv_id}"
+                     data-original="${v.cbm}"
+                     onchange="saveCbm(this)"
+                     oninput="markChanged(this)">
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
   `;
 }
 
-// ── Shopify Sync ─────────────────────────────────────────────
-const SYNC_ZONES = [
-  {name:"Christchurch",             regions:"Canterbury",                          key:"oz_chch"},
-  {name:"South Island",             regions:"Otago, Southland, Marlborough, West Coast, Nelson, Tasman", key:"oz_si"},
-  {name:"NI Lower",                 regions:"Wellington, Manawatu-Whanganui, Hawke's Bay", key:"oz_ni_lower"},
-  {name:"Waikato",                  regions:"Waikato",                             key:"oz_waikato"},
-  {name:"Bay of Plenty / Gisborne", regions:"Bay of Plenty, Gisborne",            key:"oz_bop_gis"},
-  {name:"Taranaki",                 regions:"Taranaki",                            key:"oz_taranaki"},
-  {name:"Auckland",                 regions:"Auckland",                            key:"oz_ni_upper"},
-];
-
-function renderSyncPreview() {
-  if (!ratesData) return;
-  const rates = ratesData.oversized.rates;
-  const tbody = document.getElementById('sync-preview');
-  tbody.innerHTML = SYNC_ZONES.map(z => {
-    const rate = rates[z.key]?.[0];
-    return `<tr>
-      <td style="padding:5px 10px;border:1px solid #e5e5e5;font-weight:500;">${z.name}</td>
-      <td style="padding:5px 10px;border:1px solid #e5e5e5;color:#555;">${z.regions}</td>
-      <td style="padding:5px 10px;border:1px solid #e5e5e5;text-align:right;">$${rate ?? '—'}</td>
-    </tr>`;
-  }).join('');
+function setSort(key) {
+  if (STATE.sort === key) STATE.sortDir *= -1;
+  else { STATE.sort = key; STATE.sortDir = 1; }
+  renderTable();
 }
 
-const origShowTab = showTab;
+function markChanged(input) {
+  const orig = parseFloat(input.dataset.original);
+  const val = parseFloat(input.value);
+  if (Math.abs(orig - val) > 0.00005) input.classList.add('changed');
+  else input.classList.remove('changed');
+}
 
-async function runSync() {
-  const btn = document.getElementById('sync-btn');
-  const out = document.getElementById('sync-result');
-  btn.disabled = true;
-  btn.textContent = 'Syncing…';
-  out.innerHTML = '';
+async function saveCbm(input) {
+  const inv = input.dataset.inv;
+  const cbm = parseFloat(input.value);
+  if (isNaN(cbm)) return;
+  input.classList.remove('changed', 'saved', 'error');
+  input.classList.add('saving');
   try {
-    const res = await fetch('/api/sync-shopify-zones', {method:'POST'});
-    const d   = await res.json();
-    if (d.error) {
-      out.innerHTML = `<span style="color:#c62828">❌ ${d.error}</span>`;
-      toast(d.error, true);
+    const r = await fetch('/api/cbm', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inv_id: inv, cbm })
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      input.classList.remove('saving');
+      input.classList.add('saved');
+      input.dataset.original = data.cbm;
+      // Update in-memory state
+      const v = allVariants.find(v => v.inv_id === inv);
+      if (v) v.cbm = data.cbm;
+      setTimeout(() => input.classList.remove('saved'), 1500);
     } else {
-      let html = '';
-      for (const r of d.results) {
-        if (r.success) {
-          html += `<p style="color:#2e7d32">✅ <b>${r.profile}</b> — ${r.zones_created} zones created, ${r.zones_deleted} old zone(s) removed</p>`;
-        } else {
-          const errs = r.errors.map(e => e.message).join('; ');
-          html += `<p style="color:#c62828">❌ <b>${r.profile}</b> — ${errs}</p>`;
-        }
-      }
-      out.innerHTML = html;
-      toast(d.results.every(r => r.success) ? 'Sync complete ✓' : 'Sync finished with errors', !d.results.every(r => r.success));
+      throw new Error(data.detail || 'save failed');
     }
-  } catch(e) {
-    out.innerHTML = `<span style="color:#c62828">Request failed: ${e}</span>`;
-    toast('Sync failed', true);
+  } catch (e) {
+    input.classList.remove('saving');
+    input.classList.add('error');
+    alert('Save failed: ' + e.message);
   }
-  btn.disabled = false;
-  btn.textContent = 'Sync Zones to Shopify';
 }
 
-// Patch showTab to render preview when switching to sync tab
-window.showTab = function(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  event.target.classList.add('active');
-  if (name === 'sync') renderSyncPreview();
-};
+document.getElementById('search').addEventListener('input', renderTable);
+document.getElementById('filter-category').addEventListener('change', renderTable);
+document.getElementById('filter-size').addEventListener('change', renderTable);
 
-// ── Init ─────────────────────────────────────────────────────
-loadAll();
+// Quote tester
+async function runQuote() {
+  const city = document.getElementById('qt-city').value;
+  const pc = document.getElementById('qt-postcode').value;
+  const addr = document.getElementById('qt-address').value;
+  const cbm = parseFloat(document.getElementById('qt-cbm').value);
+  const qty = parseInt(document.getElementById('qt-qty').value) || 1;
+  const out = document.getElementById('quote-output');
+  out.innerHTML = '<div class="loading" style="padding:20px;">Quoting…</div>';
+  try {
+    const r = await fetch('/shopify/rates/debug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rate: {
+          destination: { country: 'NZ', city, postal_code: pc, address1: addr, name: 'Test' },
+          items: [{ name: 'Test', sku: 'TEST', quantity: qty, grams: Math.round(cbm * 1000), price: 10000 }],
+          currency: 'NZD'
+        }
+      })
+    });
+    const data = await r.json();
+    if (!data.success) {
+      out.innerHTML = `<div class="quote-result">No carriers matched: ${data.error || 'unknown'}</div>`;
+      return;
+    }
+    out.innerHTML = `
+      <div class="quote-result">
+        <div class="price">$${data.customer_price.toFixed(2)} <small style="font-size:13px;color:#6b7280;font-weight:400;">customer pays</small></div>
+        <div class="desc">Cart CBM: ${data.cart_cbm}m³ → ${data.chosen_carrier} (${data.chosen_service}) raw $${data.raw_cost} × 1.10 markup</div>
+        <table style="margin-top:14px;">
+          <thead><tr><th>Carrier</th><th>Service</th><th style="text-align:right;">Raw cost</th><th>Notes</th></tr></thead>
+          <tbody>
+            ${data.all_quotes.map(q => `
+              <tr ${q.carrier === data.chosen_carrier ? 'style="background:#fef3c7"' : ''}>
+                <td>${escapeHtml(q.carrier)}</td>
+                <td>${escapeHtml(q.service)}</td>
+                <td class="num">$${q.raw_cost.toFixed(2)}</td>
+                <td><small style="color:#6b7280">${escapeHtml(q._source || '')}</small></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) {
+    out.innerHTML = `<div class="quote-result">Error: ${e.message}</div>`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Auto-load on page load
+loadCbm();
 </script>
+
 </body>
 </html>
