@@ -28,6 +28,13 @@
   .row input, .row select { padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
   .row input[type=search] { flex: 1; min-width: 200px; }
 
+  /* Shopify-style address form */
+  .addr-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 20px; max-width: 600px; }
+  .addr-grid .field { display: flex; flex-direction: column; gap: 4px; }
+  .addr-grid .field label { font-size: 11px; color: #6b7280; font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
+  .addr-grid .field input, .addr-grid .field select { padding: 9px 11px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; background: #fff; }
+  .addr-grid .field input:focus, .addr-grid .field select:focus { outline: none; border-color: #1a1a1a; box-shadow: 0 0 0 3px rgba(26, 26, 26, 0.06); }
+
   .stat-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
   .stat { background: #fff; padding: 12px 16px; border: 1px solid #e5e7eb; border-radius: 8px; min-width: 140px; }
   .stat .label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -119,11 +126,63 @@
       <h2>Test a quote</h2>
       <p class="hint">Build a real cart from your products and see what NED Freight quotes at checkout.</p>
 
-      <h3 style="font-size:13px;font-weight:600;color:#374151;margin:14px 0 8px;">1. Destination</h3>
-      <div class="row" style="margin-bottom:18px;">
-        <input type="text" id="qt-city" placeholder="City" value="Auckland" style="width:160px;">
-        <input type="text" id="qt-postcode" placeholder="Postcode" value="1010" style="width:110px;">
-        <input type="text" id="qt-address" placeholder="Street address" value="1 Queen St" style="width:260px;">
+      <h3 style="font-size:13px;font-weight:600;color:#374151;margin:14px 0 8px;">1. Delivery address</h3>
+      <div class="addr-grid">
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Country/Region</label>
+          <select id="qt-country">
+            <option value="NZ" selected>New Zealand</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>First name</label>
+          <input type="text" id="qt-first" placeholder="First name" value="Test">
+        </div>
+        <div class="field">
+          <label>Last name</label>
+          <input type="text" id="qt-last" placeholder="Last name" value="Customer">
+        </div>
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Address</label>
+          <input type="text" id="qt-address" placeholder="Street address" value="1 Queen Street">
+        </div>
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Apartment, suite, etc. <span style="color:#9ca3af;font-weight:normal;">(optional)</span></label>
+          <input type="text" id="qt-address2" placeholder="Apartment, suite, etc.">
+        </div>
+        <div class="field">
+          <label>City</label>
+          <input type="text" id="qt-city" placeholder="City" value="Auckland">
+        </div>
+        <div class="field">
+          <label>Region</label>
+          <select id="qt-region">
+            <option value="AUK" selected>Auckland</option>
+            <option value="BOP">Bay of Plenty</option>
+            <option value="CAN">Canterbury</option>
+            <option value="GIS">Gisborne</option>
+            <option value="HKB">Hawke's Bay</option>
+            <option value="MWT">Manawatū-Whanganui</option>
+            <option value="MBH">Marlborough</option>
+            <option value="NSN">Nelson</option>
+            <option value="NTL">Northland</option>
+            <option value="OTA">Otago</option>
+            <option value="STL">Southland</option>
+            <option value="TKI">Taranaki</option>
+            <option value="TAS">Tasman</option>
+            <option value="WKO">Waikato</option>
+            <option value="WGN">Wellington</option>
+            <option value="WTC">West Coast</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Postal code</label>
+          <input type="text" id="qt-postcode" placeholder="Postal code" value="1010">
+        </div>
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Phone <span style="color:#9ca3af;font-weight:normal;">(optional)</span></label>
+          <input type="text" id="qt-phone" placeholder="Phone">
+        </div>
       </div>
 
       <h3 style="font-size:13px;font-weight:600;color:#374151;margin:14px 0 8px;">2. Add products</h3>
@@ -532,9 +591,20 @@ document.addEventListener('click', (e) => {
 
 async function runQuote() {
   if (cart.length === 0) return;
-  const city = document.getElementById('qt-city').value;
-  const pc = document.getElementById('qt-postcode').value;
-  const addr = document.getElementById('qt-address').value;
+  const first = document.getElementById('qt-first').value;
+  const last = document.getElementById('qt-last').value;
+  const destination = {
+    country:     document.getElementById('qt-country').value,
+    name:        (first + ' ' + last).trim() || 'Customer',
+    first_name:  first,
+    last_name:   last,
+    address1:    document.getElementById('qt-address').value,
+    address2:    document.getElementById('qt-address2').value,
+    city:        document.getElementById('qt-city').value,
+    province:    document.getElementById('qt-region').value,
+    postal_code: document.getElementById('qt-postcode').value,
+    phone:       document.getElementById('qt-phone').value,
+  };
   const out = document.getElementById('quote-output');
   out.innerHTML = '<div class="loading" style="padding:20px;">Quoting…</div>';
   try {
@@ -549,11 +619,7 @@ async function runQuote() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        rate: {
-          destination: { country: 'NZ', city, postal_code: pc, address1: addr, name: 'Test' },
-          items,
-          currency: 'NZD'
-        }
+        rate: { destination, items, currency: 'NZD' }
       })
     });
     const data = await r.json();
