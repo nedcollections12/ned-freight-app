@@ -124,7 +124,7 @@ async def shopify_rates(request: Request):
             "service_code": "NED_LIVE",
             "total_price":  str(price_cents),
             "currency":     currency,
-            "description":  f"{result['chosen_carrier']} — {result['chosen_service']}",
+            "description":  "3 to 5 business days",
         }]
     }
 
