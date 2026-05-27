@@ -15,10 +15,19 @@ All amounts NZD.
 import json
 import math
 import os
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
 import httpx
+
+
+def _strip_diacritics(s: str) -> str:
+    """Remove macrons and other accents — e.g. 'Wānaka' → 'wanaka'."""
+    if not s:
+        return ""
+    decomposed = unicodedata.normalize("NFD", s)
+    return "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
 
 BASE_DIR = Path(__file__).parent
 RATES_FILE = BASE_DIR / "data" / "carrier_rates.json"
@@ -66,9 +75,12 @@ def reload_carrier_rates():
 
 
 def _normalise_city(city: str) -> str:
-    """Map a customer city to a rate-card city via alias table."""
+    """
+    Map a customer city to a rate-card city via alias table.
+    Strips macrons first so 'Wānaka' matches the same key as 'Wanaka'.
+    """
     rates = _load_carrier_rates()
-    city_key = (city or "").strip().lower()
+    city_key = _strip_diacritics((city or "").strip().lower())
     if not city_key:
         return ""
     aliases = rates.get("city_aliases", {})
