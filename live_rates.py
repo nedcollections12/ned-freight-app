@@ -241,25 +241,41 @@ def quote_mainfreight(cart_cbm: float, destination: dict) -> Optional[dict]:
     }
 
 
+def _df_tier_index(cart_cbm: float) -> int:
+    """Pick per-m³ tier based on cart CBM. 0 = small (<5), 1 = mid (5-10), 2 = large (10+)."""
+    if cart_cbm >= 10:
+        return 2
+    if cart_cbm >= 5:
+        return 1
+    return 0
+
+
 def quote_dailyfreight(cart_cbm: float, destination: dict) -> Optional[dict]:
     """
-    Compute Dailyfreight cost from cached rate card.
-    Formula: MAX(min, per_m3 × cart_cbm). Result is excl GST & excl FAF.
+    Dailyfreight quote with hub-and-spoke zones and volume-tier discounts.
+
+    The city alias map routes the customer's suburb to a specific rate key like
+    'cromwell_z1' (Cromwell metro) or 'cromwell_z5' (Wanaka, Queenstown, etc.).
+    Per-m³ rate drops with cart size — three tiers in the rate card.
+
+    Formula: MAX(base, per_m3_tier × cart_cbm) × FAF × GST
     """
     rates = _load_carrier_rates()
-    city = _normalise_city(destination.get("city", ""))
-    rate = rates["dailyfreight"]["rates"].get(city)
+    rate_key = _normalise_city(destination.get("city", ""))
+    rate = rates["dailyfreight"]["rates"].get(rate_key)
     if not rate:
         return None
-    per = rate["per_m3"]
-    minc = rate["min"]
-    raw_excl = max(minc, per * cart_cbm)
+    tier_idx = _df_tier_index(cart_cbm)
+    per_m3 = rate["tiers"][tier_idx]
+    base = rate["base"]
+    raw_excl = max(base, per_m3 * cart_cbm)
     raw_cost = raw_excl * FAF_MULTIPLIER * GST_MULTIPLIER
+    tier_label = ["<5m³", "5-10m³", "≥10m³"][tier_idx]
     return {
         "carrier":   "Dailyfreight",
         "service":   "LCL Palletised",
         "raw_cost":  round(raw_cost, 2),
-        "_source":   f"Formula: MAX({minc}, {per} × {cart_cbm:.3f}) × FAF × GST",
+        "_source":   f"{rate_key} tier {tier_label}: MAX({base}, {per_m3} × {cart_cbm:.3f}) × FAF × GST",
     }
 
 
