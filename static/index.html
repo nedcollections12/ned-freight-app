@@ -355,9 +355,8 @@ async function loadCarriers() {
 function renderCarriers(data) {
   return `
     ${renderCastleParcels(data.castle_parcels)}
-    ${renderFormulaCarrier(data.mainfreight, 'mainfreight', 'Mainfreight')}
-    ${renderFormulaCarrier(data.dailyfreight, 'dailyfreight', 'Dailyfreight')}
-    ${renderKiwiExpress(data.kiwi_express)}
+    ${renderMainfreight(data.mainfreight)}
+    ${renderDailyfreight(data.dailyfreight)}
   `;
 }
 
@@ -403,10 +402,9 @@ function renderCastleParcels(cp) {
   `;
 }
 
-function renderFormulaCarrier(c, key, label) {
-  const m = c._meta;
-  const rates = c.rates;
-  const zones = [...new Set(Object.values(rates).map(r => r.zone_group))];
+function renderMainfreight(mf) {
+  const m = mf._meta;
+  const rates = mf.rates;
   return `
     <div class="carrier-block">
       <h3>${escapeHtml(m.label)} — ${escapeHtml(m.service)}</h3>
@@ -424,17 +422,15 @@ function renderFormulaCarrier(c, key, label) {
               <th class="num">Base</th>
               <th class="num">Minimum</th>
               <th class="num">Per m³</th>
-              <th>Zone group</th>
             </tr>
           </thead>
           <tbody>
             ${Object.entries(rates).map(([city, r]) => `
               <tr>
-                <td><b>${escapeHtml(city.replace(/^./, c => c.toUpperCase()))}</b></td>
+                <td><b>${escapeHtml(titleCase(city))}</b></td>
                 <td class="num">$${r.base.toFixed(2)}</td>
                 <td class="num">$${r.min.toFixed(2)}</td>
                 <td class="num">$${r.per_m3.toFixed(2)}</td>
-                <td><small>${escapeHtml(r.zone_group)}</small></td>
               </tr>
             `).join('')}
           </tbody>
@@ -444,49 +440,60 @@ function renderFormulaCarrier(c, key, label) {
   `;
 }
 
-function renderKiwiExpress(kx) {
-  const m = kx._meta;
+function renderDailyfreight(df) {
+  const m = df._meta;
+  const rates = df.rates;
+  // Group entries by hub city (e.g. "auckland_z1", "auckland_z3" → "auckland")
+  const grouped = {};
+  Object.entries(rates).forEach(([key, r]) => {
+    const m2 = key.match(/^(.+?)_z(\d+)$/);
+    const hub = m2 ? m2[1] : key;
+    const zone = m2 ? `Zone ${m2[2]}` : 'All zones';
+    if (!grouped[hub]) grouped[hub] = [];
+    grouped[hub].push({ zone, ...r });
+  });
   return `
     <div class="carrier-block">
       <h3>${escapeHtml(m.label)} — ${escapeHtml(m.service)}</h3>
       <div class="carrier-meta">
         <div><b>Formula:</b> <code>${escapeHtml(m.formula)}</code></div>
+        <div><b>Tiers:</b> ${escapeHtml(m.tiers)}</div>
         <div><b>Vintage:</b> ${escapeHtml(m.vintage)}</div>
       </div>
       <div class="callout-info">${escapeHtml(m.note)}</div>
-      <h4>B2C rates (default — consumer customers)</h4>
-      ${renderKxTable(kx.b2c.rates)}
-      <h4>B2B rates (lower — wholesale customers)</h4>
-      ${renderKxTable(kx.b2b.rates)}
+      <h4>Rate card (ex-GST, ex-FAF — formula applies the uplifts)</h4>
+      <div class="table-wrap">
+        <table class="rate-table">
+          <thead>
+            <tr>
+              <th>Destination hub</th>
+              <th>Zone</th>
+              <th class="num">Base</th>
+              <th class="num">Per m³ &lt;5m³</th>
+              <th class="num">Per m³ 5-10m³</th>
+              <th class="num">Per m³ ≥10m³</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${Object.entries(grouped).map(([hub, entries]) => entries.map((r, i) => `
+              <tr>
+                <td>${i === 0 ? `<b>${escapeHtml(titleCase(hub))}</b>` : ''}</td>
+                <td>${escapeHtml(r.zone)}</td>
+                <td class="num">$${r.base.toFixed(2)}</td>
+                <td class="num">$${r.tiers[0].toFixed(2)}</td>
+                <td class="num">$${r.tiers[1].toFixed(2)}</td>
+                <td class="num">$${r.tiers[2].toFixed(2)}</td>
+              </tr>
+            `).join('')).join('')}
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
 
-function renderKxTable(rates) {
-  return `
-    <div class="table-wrap">
-      <table class="rate-table">
-        <thead>
-          <tr>
-            <th>Destination + Zone</th>
-            <th class="num">Min</th>
-            <th class="num">Base</th>
-            <th class="num">Per m³</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${Object.entries(rates).map(([key, r]) => `
-            <tr>
-              <td><b>${escapeHtml(key.replace(/_z(\d)/, ' Zone $1').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()))}</b></td>
-              <td class="num">$${r.min.toFixed(2)}</td>
-              <td class="num">$${r.base.toFixed(2)}</td>
-              <td class="num">$${r.per_m3.toFixed(2)}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
+function titleCase(s) {
+  return String(s || '').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
 // CBM admin
