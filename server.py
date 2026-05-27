@@ -120,14 +120,14 @@ async def shopify_rates(request: Request):
 
     rates_out = []
 
-    # Add a free "Pickup from Wigram warehouse" option for Canterbury customers only
+    # Add a "PICK UP - Wigram Warehouse" option for Canterbury customers only
     if _is_canterbury(destination):
         rates_out.append({
-            "service_name": "Free Pickup — Wigram Warehouse",
+            "service_name": "PICK UP - Wigram Warehouse",
             "service_code": "PICKUP",
             "total_price":  "0",
             "currency":     currency,
-            "description":  "Free pickup from 7 Paradyne Place, Wigram (please arrange a time before collection)"
+            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
         })
 
     if not result.get("success"):
