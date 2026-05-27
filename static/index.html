@@ -391,13 +391,17 @@ function renderCastleParcels(cp) {
           </tbody>
         </table>
       </div>
-      <h4>Surcharges</h4>
-      <ul>
-        <li>Rural delivery: <b>$${cp.surcharges.rural_delivery.toFixed(2)}</b> per parcel</li>
-        <li>Residential delivery: <b>$${cp.surcharges.residential_delivery.toFixed(2)}</b> per parcel</li>
-      </ul>
-      <h4>Satchel rates</h4>
-      <ul>${cp.satchels.map(s => `<li>${escapeHtml(s.label)}: <b>$${s.price.toFixed(2)}</b></li>`).join('')}</ul>
+      ${cp.surcharges ? `
+        <h4>Surcharges</h4>
+        <ul>
+          <li>Rural delivery: <b>$${cp.surcharges.rural_delivery.toFixed(2)}</b> per parcel</li>
+          <li>Residential delivery: <b>$${cp.surcharges.residential_delivery.toFixed(2)}</b> per parcel</li>
+        </ul>
+      ` : ''}
+      ${cp.satchels && cp.satchels.length ? `
+        <h4>Satchel rates</h4>
+        <ul>${cp.satchels.map(s => `<li>${escapeHtml(s.label)}: <b>$${s.price.toFixed(2)}</b></li>`).join('')}</ul>
+      ` : ''}
     </div>
   `;
 }

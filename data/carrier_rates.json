@@ -32,7 +32,13 @@
     "surcharges": {
       "rural_delivery":       7.09,
       "residential_delivery": 2.53
-    }
+    },
+    "satchels": [
+      {"label": "CPS / Small", "price": 4.78},
+      {"label": "CP / Medium", "price": 5.99},
+      {"label": "Large",       "price": 9.69},
+      {"label": "CPM / XL",    "price": 10.84}
+    ]
   },
   "mainfreight": {
     "_meta": {
