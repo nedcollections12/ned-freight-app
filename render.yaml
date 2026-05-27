@@ -2,8 +2,11 @@ services:
   - type: web
     name: ned-freight-app
     runtime: python
+    # NOTE: Free tier sleeps after 15min idle → 30-40s cold-start wake-up.
+    # For production: upgrade to "Starter" ($7/mo) in Render dashboard to keep app warm 24/7.
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
+    healthCheckPath: /health
     envVars:
       - key: PORT
         value: 10000

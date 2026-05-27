@@ -118,28 +118,66 @@ async def shopify_rates(request: Request):
     # Live carrier quote
     result = await live_rates.calculate_freight(items, destination)
 
-    if not result.get("success"):
-        # No carrier matched — fall back to "contact us" rate
-        return {"rates": [{
-            "service_name": "Freight — Contact Us",
-            "service_code": "BY_REQUEST",
+    rates_out = []
+
+    # Add a free "Pickup from Wigram warehouse" option for Canterbury customers only
+    if _is_canterbury(destination):
+        rates_out.append({
+            "service_name": "Free Pickup — Wigram Warehouse",
+            "service_code": "PICKUP",
             "total_price":  "0",
             "currency":     currency,
-            "description":  "Custom quote required for this destination"
-        }]}
+            "description":  "Free pickup from 7 Paradyne Place, Wigram (please arrange a time before collection)"
+        })
+
+    if not result.get("success"):
+        # No carrier matched — only show pickup (if available) or "Contact us"
+        if not rates_out:
+            rates_out.append({
+                "service_name": "Freight — Contact Us",
+                "service_code": "BY_REQUEST",
+                "total_price":  "0",
+                "currency":     currency,
+                "description":  "Custom quote required for this destination"
+            })
+        return {"rates": rates_out}
 
     # Round customer price up to nearest dollar for a clean display
     price_cents = int(math.ceil(result["customer_price"]) * 100)
+    rates_out.append({
+        "service_name": "Standard Delivery",
+        "service_code": "NED_LIVE",
+        "total_price":  str(price_cents),
+        "currency":     currency,
+        "description":  "3 to 5 business days",
+    })
+    return {"rates": rates_out}
 
-    return {
-        "rates": [{
-            "service_name": "Standard Delivery",
-            "service_code": "NED_LIVE",
-            "total_price":  str(price_cents),
-            "currency":     currency,
-            "description":  "3 to 5 business days",
-        }]
+
+def _is_canterbury(destination: dict) -> bool:
+    """Detect if a destination is in Canterbury (eligible for warehouse pickup)."""
+    province = (destination.get("province") or "").upper().strip()
+    if province in ("CAN", "CANTERBURY"):
+        return True
+    # Fall back to city/postcode if province missing
+    city = (destination.get("city") or "").lower().strip()
+    pc = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    canterbury_cities = {
+        "christchurch", "chch", "rolleston", "lincoln", "rangiora", "kaiapoi",
+        "prebbleton", "halswell", "wigram", "burnside", "ashburton", "darfield",
+        "oxford", "amberley", "methven", "geraldine", "timaru", "kaikoura",
+        "akaroa", "lyttelton", "sumner", "redcliffs", "ferrymead",
     }
+    if city in canterbury_cities:
+        return True
+    # Canterbury postcode ranges: 7000-8999
+    try:
+        pc_int = int(pc[:4])
+        if 7000 <= pc_int <= 8999:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
 
 
 @app.post("/shopify/rates/debug")

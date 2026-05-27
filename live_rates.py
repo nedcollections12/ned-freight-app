@@ -159,12 +159,13 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     }
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=4.0) as client:
             r = await client.post(GSS_URL, json=payload, headers=headers)
         if r.status_code != 200:
             return None
         data = r.json()
     except Exception:
+        # GSS timeout/error → fall back to MF/DF formulas (instant)
         return None
 
     options = data.get("Available", [])
