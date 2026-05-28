@@ -234,6 +234,21 @@ def _total_cbm(items: list) -> float:
     return total
 
 
+# GSS geocodes off the City field and rejects some legacy / amalgamated
+# council names (former cities and regional-district names) even with a valid
+# postcode — returning zero rate options. We remap those to the parent metro
+# for the GSS City field only; the customer's original value stays in Suburb,
+# and the rate itself is postcode-driven so it stays accurate.
+# (Confirmed unrecognised via live GSS probes; extend as new ones surface.)
+_GSS_CITY_REMAP = {
+    "north shore": "Auckland",
+    "waitemata":   "Auckland",
+    "rodney":      "Auckland",
+    "kapiti":      "Wellington",
+    "hutt city":   "Lower Hutt",
+}
+
+
 async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]:
     """
     Live quote from GoSweetSpot (Castle Parcels / Post Haste).
@@ -242,12 +257,16 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     if not GSS_ACCESS_KEY or not GSS_SITE_ID:
         return None
 
+    raw_city = destination.get("city", "")
+    # Remap GSS-unrecognised city names to their parent metro so GSS can quote.
+    gss_city = _GSS_CITY_REMAP.get(_strip_diacritics(raw_city.strip().lower()), raw_city)
+
     dest_payload = {
         "Name": destination.get("name", "Customer"),
         "Address": {
             "StreetAddress": destination.get("address1") or destination.get("address", ""),
-            "Suburb":        destination.get("city", ""),  # GSS treats Suburb loosely
-            "City":          destination.get("city", ""),
+            "Suburb":        raw_city,    # keep original locality; GSS treats Suburb loosely
+            "City":          gss_city,
             "PostCode":      destination.get("postal_code") or destination.get("zip", ""),
             "CountryCode":   destination.get("country") or "NZ",
         }
