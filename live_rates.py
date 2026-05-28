@@ -171,7 +171,10 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     }
 
     try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
+        # 7s: catches GSS's slow tail while staying under Shopify's ~10s
+        # carrier-service window (MF/DF + serialization are instant, so the
+        # rest of the request needs only ~1s of that budget).
+        async with httpx.AsyncClient(timeout=7.0) as client:
             r = await client.post(GSS_URL, json=payload, headers=headers)
         if r.status_code != 200:
             return None
