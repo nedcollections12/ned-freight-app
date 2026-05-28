@@ -87,6 +87,105 @@ def _normalise_city(city: str) -> str:
     return aliases.get(city_key, city_key)
 
 
+# ── Postcode / province fallback ────────────────────────────────────────────
+# When the city field doesn't resolve to a rate key (e.g. Google Address
+# Validation puts a suburb like "Karori" or "Riccarton" in the city field),
+# we resolve the destination by NZ postcode, then by region. This stops a
+# valid NZ address from falling through to no_carrier_match (which would let
+# Shopify undercharge via its static delivery profile).
+#
+# Each entry maps to (mainfreight_key, dailyfreight_key) because MF uses flat
+# city keys while DF uses zoned keys. Ranges are inclusive 4-digit postcodes.
+_POSTCODE_KEYS = [
+    (100,  409,  "whangarei",        "whangarei"),       # Northland (Whangarei, Dargaville, Kerikeri, Paihia)
+    (410,  499,  "kaitaia",          "kaitaia"),          # Far North (Kaitaia)
+    (500,  599,  "whangarei",        "whangarei"),        # Kaipara
+    (600,  999,  "auckland",         "auckland_z1"),      # North Shore / Rodney / West Auckland
+    (1010, 1099, "auckland",         "auckland_z1"),      # Auckland central / isthmus / east
+    (2000, 2999, "auckland",         "auckland_z1"),      # South Auckland / Manukau / Papakura / Pukekohe
+    (3010, 3099, "rotorua",          "rotorua"),          # Rotorua
+    (3110, 3119, "tauranga",         "tauranga"),         # Tauranga / Mt Maunganui / Papamoa / Te Puke
+    (3120, 3199, "rotorua",          "whakatane"),        # Eastern BoP (Whakatane, Opotiki)
+    (3200, 3299, "hamilton",         "hamilton_z1"),      # Hamilton
+    (3330, 3399, "taupo",            "taupo"),            # Taupo / Turangi
+    (3400, 3499, "hamilton",         "hamilton_z1"),      # Cambridge / Te Awamutu / Otorohanga
+    (3500, 3599, "thames",           "thames"),           # Thames / Coromandel
+    (4010, 4099, "gisborne",         "gisborne"),         # Gisborne
+    (4100, 4299, "napier",           "napier"),           # Hawke's Bay (Napier, Hastings, Waipukurau)
+    (4300, 4399, "new plymouth",     "new plymouth"),     # Taranaki (New Plymouth, Stratford)
+    (4400, 4499, "palmerston north", "palmerston north"), # Manawatu (PN, Feilding, Dannevirke)
+    (4500, 4699, "wanganui",         "wanganui"),         # Whanganui + South Taranaki (Hawera)
+    (5010, 5099, "wellington",       "wellington"),       # Hutt / Porirua / Kapiti
+    (5500, 5599, "levin",            "levin"),            # Horowhenua (Levin)
+    (5800, 5899, "wellington",       "masterton"),        # Wairarapa (Masterton)
+    (6010, 6099, "wellington",       "wellington"),       # Wellington city
+    (7010, 7199, "nelson",           "nelson"),           # Nelson / Tasman (Richmond, Motueka)
+    (7200, 7399, "blenheim",         "blenheim"),         # Marlborough (Blenheim, Picton) + Kaikoura / Hanmer
+    (7400, 7699, "christchurch",     "christchurch"),     # North Canterbury (Rangiora, Amberley, Oxford)
+    (7700, 7799, "christchurch",     "ashburton"),        # Mid Canterbury (Ashburton)
+    (7800, 7899, "greymouth",        "greymouth"),        # West Coast (Greymouth, Hokitika, Westport)
+    (7900, 7999, "timaru",           "timaru"),           # South Canterbury (Timaru)
+    (8010, 8099, "christchurch",     "christchurch"),     # Christchurch city
+    (9000, 9099, "dunedin",          "dunedin"),          # Dunedin
+    (9300, 9399, "cromwell",         "cromwell_z1"),      # Central Otago (Cromwell, Alexandra, Queenstown, Wanaka)
+    (9400, 9499, "oamaru",           "oamaru"),           # Waitaki (Oamaru)
+    (9700, 9799, "invercargill",     "gore"),             # Gore / Eastern Southland
+    (9800, 9899, "invercargill",     "invercargill"),     # Invercargill / Southland
+]
+
+# Region (Shopify province) → (mainfreight_key, dailyfreight_key).
+# Coarser than postcode but a robust catch-all: the region IS the location.
+_PROVINCE_KEYS = {
+    "northland":            ("whangarei",        "whangarei"),
+    "auckland":             ("auckland",         "auckland_z1"),
+    "waikato":              ("hamilton",         "hamilton_z1"),
+    "bay of plenty":        ("tauranga",         "tauranga"),
+    "gisborne":             ("gisborne",         "gisborne"),
+    "hawke's bay":          ("napier",           "napier"),
+    "hawkes bay":           ("napier",           "napier"),
+    "taranaki":             ("new plymouth",     "new plymouth"),
+    "manawatu-whanganui":   ("palmerston north", "palmerston north"),
+    "manawatu-wanganui":    ("palmerston north", "palmerston north"),
+    "manawatu":             ("palmerston north", "palmerston north"),
+    "wellington":           ("wellington",       "wellington"),
+    "tasman":               ("nelson",           "nelson"),
+    "nelson":               ("nelson",           "nelson"),
+    "marlborough":          ("blenheim",         "blenheim"),
+    "west coast":           ("greymouth",        "greymouth"),
+    "canterbury":           ("christchurch",     "christchurch"),
+    "otago":                ("dunedin",          "dunedin"),
+    "southland":            ("invercargill",     "invercargill"),
+}
+
+
+def _fallback_keys(destination: dict) -> Optional[tuple]:
+    """
+    Resolve (mainfreight_key, dailyfreight_key) from postcode, then province.
+    Used only when the city field fails to match any rate key, so it never
+    alters pricing for addresses that already resolve. Returns None if neither
+    postcode nor province can be matched.
+    """
+    pc_raw = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    if pc_raw:
+        try:
+            pc = int(pc_raw[:4])
+            for low, high, mf_key, df_key in _POSTCODE_KEYS:
+                if low <= pc <= high:
+                    return (mf_key, df_key)
+        except (ValueError, TypeError):
+            pass
+
+    prov = _strip_diacritics((destination.get("province") or "").strip().lower())
+    if prov:
+        if prov in _PROVINCE_KEYS:
+            return _PROVINCE_KEYS[prov]
+        # Tolerate partial/variant region strings ("manawatu whanganui" etc.)
+        for key, val in _PROVINCE_KEYS.items():
+            if key in prov or prov in key:
+                return val
+    return None
+
+
 def _cube_dimensions_cm(weight_kg: float) -> tuple:
     """
     Convert a weight (= CBM in kg) into a cube's side length in cm.
@@ -220,13 +319,14 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     }
 
 
-def quote_mainfreight(cart_cbm: float, destination: dict) -> Optional[dict]:
+def quote_mainfreight(cart_cbm: float, destination: dict, override_key: Optional[str] = None) -> Optional[dict]:
     """
     Compute Mainfreight cost from cached rate card.
     Formula: MAX(min_charge, base + per_m3 × cart_cbm). Result is excl GST & excl FAF.
+    override_key forces a specific rate key (used by the postcode/province fallback).
     """
     rates = _load_carrier_rates()
-    city = _normalise_city(destination.get("city", ""))
+    city = override_key or _normalise_city(destination.get("city", ""))
     rate = rates["mainfreight"]["rates"].get(city)
     if not rate:
         return None
@@ -253,7 +353,7 @@ def _df_tier_index(cart_cbm: float) -> int:
     return 0
 
 
-def quote_dailyfreight(cart_cbm: float, destination: dict) -> Optional[dict]:
+def quote_dailyfreight(cart_cbm: float, destination: dict, override_key: Optional[str] = None) -> Optional[dict]:
     """
     Dailyfreight quote with hub-and-spoke zones and volume-tier discounts.
 
@@ -262,9 +362,10 @@ def quote_dailyfreight(cart_cbm: float, destination: dict) -> Optional[dict]:
     Per-m³ rate drops with cart size — three tiers in the rate card.
 
     Formula: MAX(base, per_m3_tier × cart_cbm) × FAF × GST
+    override_key forces a specific rate key (used by the postcode/province fallback).
     """
     rates = _load_carrier_rates()
-    rate_key = _normalise_city(destination.get("city", ""))
+    rate_key = override_key or _normalise_city(destination.get("city", ""))
     rate = rates["dailyfreight"]["rates"].get(rate_key)
     if not rate:
         return None
@@ -304,6 +405,23 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     df = quote_dailyfreight(cart_cbm, destination)
     if df:
         quotes.append(df)
+
+    # Postcode/province fallback: if neither formula carrier matched the city
+    # name (e.g. Google put a suburb in the city field), resolve by postcode
+    # then region so we never drop to no_carrier_match for a real NZ address.
+    # Only triggers when both MF and DF missed, so existing pricing is untouched.
+    if not mf and not df:
+        fb = _fallback_keys(destination)
+        if fb:
+            mf_key, df_key = fb
+            mf = quote_mainfreight(cart_cbm, destination, override_key=mf_key)
+            if mf:
+                mf["_source"] += "  [postcode/province fallback]"
+                quotes.append(mf)
+            df = quote_dailyfreight(cart_cbm, destination, override_key=df_key)
+            if df:
+                df["_source"] += "  [postcode/province fallback]"
+                quotes.append(df)
 
     if not quotes:
         return {
