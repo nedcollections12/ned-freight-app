@@ -52,6 +52,16 @@
   td input.cbm-input.saved { background: #d1fae5; border-color: #10b981; }
   td input.cbm-input.error { background: #fee2e2; border-color: #ef4444; }
 
+  /* Save confirmation toast */
+  #toast-wrap { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 10px; align-items: flex-end; }
+  .toast { display: flex; align-items: center; gap: 10px; min-width: 240px; max-width: 380px; padding: 12px 16px; border-radius: 8px; color: #fff; font-size: 14px; font-weight: 500; box-shadow: 0 6px 20px rgba(0,0,0,0.18); opacity: 0; transform: translateY(12px); transition: opacity .25s ease, transform .25s ease; }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.ok { background: #10b981; }
+  .toast.err { background: #ef4444; }
+  .toast .ico { font-size: 16px; font-weight: 700; }
+  .toast .msg { line-height: 1.3; }
+  .toast .msg small { display: block; font-weight: 400; opacity: 0.9; font-size: 12px; }
+
   .btn { padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid; }
   .btn-primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
   .btn-primary:hover { background: #333; }
@@ -97,6 +107,8 @@
 </style>
 </head>
 <body>
+
+<div id="toast-wrap"></div>
 
 <header>
   <h1>NED Freight</h1>
@@ -617,10 +629,36 @@ function markChanged(input) {
   else input.classList.remove('changed');
 }
 
+let toastSeq = 0;
+function showToast(type, title, subtitle) {
+  const wrap = document.getElementById('toast-wrap');
+  const id = 'toast-' + (++toastSeq);
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type === 'ok' ? 'ok' : 'err');
+  el.id = id;
+  el.innerHTML = `<span class="ico">${type === 'ok' ? '✓' : '✕'}</span>`
+    + `<span class="msg">${escapeHtml(title)}${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ''}</span>`;
+  wrap.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  const ttl = type === 'ok' ? 2200 : 5000;
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 300);
+  }, ttl);
+}
+
 async function saveCbm(input) {
   const inv = input.dataset.inv;
   const cbm = parseFloat(input.value);
   if (isNaN(cbm)) return;
+
+  // Optimistic update: write to in-memory state immediately so any re-render
+  // (search/filter/sort) shows the new value rather than snapping back to the
+  // old one while the async save is still in flight.
+  const v = allVariants.find(v => v.inv_id === inv);
+  const prev = v ? v.cbm : null;
+  if (v) v.cbm = cbm;
+  input.dataset.original = cbm;
   input.classList.remove('changed', 'saved', 'error');
   input.classList.add('saving');
   try {
@@ -630,21 +668,27 @@ async function saveCbm(input) {
       body: JSON.stringify({ inv_id: inv, cbm })
     });
     const data = await r.json();
-    if (data.status === 'ok') {
-      input.classList.remove('saving');
-      input.classList.add('saved');
-      input.dataset.original = data.cbm;
-      // Update in-memory state
-      const v = allVariants.find(v => v.inv_id === inv);
-      if (v) v.cbm = data.cbm;
-      setTimeout(() => input.classList.remove('saved'), 1500);
-    } else {
-      throw new Error(data.detail || 'save failed');
+    if (!r.ok || data.status !== 'ok') {
+      throw new Error(data.detail || `save failed (HTTP ${r.status})`);
     }
+    // Reconcile with the value Shopify actually stored (it rounds to 3 dp).
+    if (v) v.cbm = data.cbm;
+    input.dataset.original = data.cbm;
+    input.value = Number(data.cbm).toFixed(4);
+    input.classList.remove('saving');
+    input.classList.add('saved');
+    setTimeout(() => input.classList.remove('saved'), 1500);
+    const label = v ? `${v.product}${v.variant && v.variant !== v.product ? ' · ' + v.variant : ''}` : 'Product';
+    const rounded = Math.abs(Number(data.cbm) - cbm) > 0.00005;
+    showToast('ok', `Saved to Shopify — ${Number(data.cbm)} m³`,
+              rounded ? `${label} (rounded from ${cbm})` : label);
   } catch (e) {
+    // Genuine failure: roll back the optimistic update and surface the error.
+    if (v) v.cbm = prev;
+    input.value = Number(prev || 0).toFixed(4);
     input.classList.remove('saving');
     input.classList.add('error');
-    alert('Save failed: ' + e.message);
+    showToast('err', 'Save failed — not stored', e.message);
   }
 }
 
