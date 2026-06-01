@@ -73,24 +73,50 @@ def _used_range_rowcount() -> int:
     return int(r.json().get("rowCount", 0))
 
 
-def order_already_logged(order_number: str) -> bool:
-    """Idempotency: skip if Order Number column (B) already contains this ref."""
-    if not order_number:
-        return False
+def _read_column_b() -> list:
+    """
+    Read column B (Order Number) from row 2 to the end of the used range.
+    Returns a list of cell values (strings), one per row from row 2 onward.
+    """
     n = _used_range_rowcount()
     if n < 2:
-        return False
-    # Read column B from row 2 to the last used row
-    addr = f"B2:B{n}"
-    r = httpx.get(f"{_ws_url()}/range(address='{addr}')?$select=values", headers=_headers(), timeout=20)
+        return []
+    r = httpx.get(
+        f"{_ws_url()}/range(address='B2:B{n}')?$select=values",
+        headers=_headers(), timeout=20,
+    )
     r.raise_for_status()
-    vals = r.json().get("values") or []
+    return [(row[0] if row else "") for row in (r.json().get("values") or [])]
+
+
+def _is_empty(cell) -> bool:
+    return cell is None or (isinstance(cell, str) and cell.strip() == "")
+
+
+def order_already_logged(order_number: str) -> bool:
+    """Idempotency: skip if Order Number column already contains this ref."""
+    if not order_number:
+        return False
     target = order_number.strip().lower()
-    for row in vals:
-        cell = (row[0] if row else "")
+    for cell in _read_column_b():
         if isinstance(cell, str) and cell.strip().lower() == target:
             return True
     return False
+
+
+def _next_empty_row() -> int:
+    """
+    First row (starting at 2) whose Order Number column (B) is empty.
+    Lands new entries in the pre-formatted blank template rows rather than
+    after them — Excel's usedRange counts formatting-only cells as 'used',
+    so a plain rowCount+1 jumps past the blank template section.
+    """
+    col_b = _read_column_b()
+    for i, cell in enumerate(col_b):
+        if _is_empty(cell):
+            return 2 + i
+    # Used range is fully populated — append below it
+    return _used_range_rowcount() + 1
 
 
 def append_order_row(
@@ -105,7 +131,7 @@ def append_order_row(
     Columns A–E only — leaves F–I (Real Carrier / Real Charge / Note / Variance) blank
     for staff to complete once the carrier invoices.
     """
-    next_row = _used_range_rowcount() + 1
+    next_row = _next_empty_row()
     addr = f"A{next_row}:E{next_row}"
     body = {
         "values": [[
