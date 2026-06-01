@@ -1133,7 +1133,10 @@ async def cin7_sales_order_webhook(request: Request, token: str = ""):
         return {"status": "ignored", "reason": "not_shopify_synced", "source": source}
 
     order_ref     = (order.get("reference") or "").strip()
-    company       = order.get("company") or order.get("billingCompany") or ""
+    # Prefer company → billing company → retail fallback (firstName + lastName)
+    company       = (order.get("company") or order.get("billingCompany") or "").strip()
+    if not company:
+        company = (f"{order.get('firstName') or ''} {order.get('lastName') or ''}").strip()
     delivery_city = order.get("deliveryCity") or ""
     freight       = order.get("freightTotal")
 
@@ -1153,7 +1156,7 @@ async def cin7_sales_order_webhook(request: Request, token: str = ""):
             suggested_carrier = ""
 
     try:
-        result = cin7_sheet_log.append_order_row(
+        result = cin7_sheet_log.prepend_order_row(
             company=company,
             order_number=order_ref,
             shopify_freight=freight,
@@ -1191,7 +1194,8 @@ async def _fetch_shopify_order_full(name: str) -> Optional[dict]:
       orders(first: 1, query: $q) {
         nodes {
           name
-          customer { companyContactProfiles { company { name } } }
+          customer { firstName lastName displayName
+                     companyContactProfiles { company { name } } }
           shippingAddress { address1 city province country zip company }
           shippingLine { discountedPriceSet { shopMoney { amount } } }
           lineItems(first: 50) { nodes { quantity sku variant {
@@ -1214,12 +1218,20 @@ async def _fetch_shopify_order_full(name: str) -> Optional[dict]:
 
 
 def _company_from_shopify(o: dict) -> str:
-    """Prefer B2B company link → fall back to ship-to company → blank for B2C."""
+    """
+    Prefer B2B company link → fall back to ship-to company → for retail
+    (no company at all) use the customer's name so the row isn't blank.
+    """
     profs = ((o.get("customer") or {}).get("companyContactProfiles") or [])
     if profs and (profs[0].get("company") or {}).get("name"):
         return profs[0]["company"]["name"]
-    ship_co = (o.get("shippingAddress") or {}).get("company") or ""
-    return ship_co
+    ship_co = ((o.get("shippingAddress") or {}).get("company") or "").strip()
+    if ship_co:
+        return ship_co
+    # Retail: use customer name
+    cust = o.get("customer") or {}
+    name = f"{cust.get('firstName') or ''} {cust.get('lastName') or ''}".strip()
+    return name or (cust.get("displayName") or "")
 
 
 def _cart_items_from_shopify(o: dict) -> list:
@@ -1290,7 +1302,7 @@ async def shopify_order_created(request: Request):
         suggested_carrier = ""
 
     try:
-        res = cin7_sheet_log.append_order_row(
+        res = cin7_sheet_log.prepend_order_row(
             company=company, order_number=name,
             shopify_freight=freight, suggested_carrier=suggested_carrier,
             delivery_city=delivery_city,

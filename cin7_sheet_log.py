@@ -119,32 +119,40 @@ def _next_empty_row() -> int:
     return _used_range_rowcount() + 1
 
 
-def append_order_row(
-    company:           str,
-    order_number:      str,
-    shopify_freight:   Optional[float],
-    suggested_carrier: str,
-    delivery_city:     str,
-) -> dict:
-    """
-    Append one row to Freight Calculator (after the last used row).
-    Columns A–E only — leaves F–I (Real Carrier / Real Charge / Note / Variance) blank
-    for staff to complete once the carrier invoices.
-    """
+def _row_values(company, order_number, shopify_freight, suggested_carrier, delivery_city):
+    return [[
+        company or "",
+        order_number or "",
+        float(shopify_freight) if shopify_freight is not None else "",
+        suggested_carrier or "",
+        delivery_city or "",
+    ]]
+
+
+def append_order_row(company, order_number, shopify_freight, suggested_carrier, delivery_city):
+    """Append after the last used row. Kept for backfill / explicit-append use."""
     next_row = _next_empty_row()
     addr = f"A{next_row}:E{next_row}"
-    body = {
-        "values": [[
-            company or "",
-            order_number or "",
-            float(shopify_freight) if shopify_freight is not None else "",
-            suggested_carrier or "",
-            delivery_city or "",
-        ]]
-    }
-    r = httpx.patch(
-        f"{_ws_url()}/range(address='{addr}')",
-        headers=_headers(), json=body, timeout=30,
-    )
+    body = {"values": _row_values(company, order_number, shopify_freight, suggested_carrier, delivery_city)}
+    r = httpx.patch(f"{_ws_url()}/range(address='{addr}')", headers=_headers(), json=body, timeout=30)
     r.raise_for_status()
     return {"row": next_row, "address": addr}
+
+
+def prepend_order_row(company, order_number, shopify_freight, suggested_carrier, delivery_city):
+    """
+    Insert a new row at row 2 and shift everything below down by one — so the
+    newest order is always at the top, just under the header. Used by live
+    triggers (Shopify orders/create + Cin7 SalesOrder.Created webhooks).
+    Columns A–E only; leaves F–I (Real Carrier / Real Charge / Note / Variance)
+    blank for staff to complete once the carrier invoices.
+    """
+    # Insert an empty row at A2:I2, shifting existing rows down
+    ins = httpx.post(f"{_ws_url()}/range(address='A2:I2')/insert",
+                     headers=_headers(), json={"shift": "Down"}, timeout=30)
+    ins.raise_for_status()
+    # Write our values into the freshly-empty A2:E2
+    body = {"values": _row_values(company, order_number, shopify_freight, suggested_carrier, delivery_city)}
+    r = httpx.patch(f"{_ws_url()}/range(address='A2:E2')", headers=_headers(), json=body, timeout=30)
+    r.raise_for_status()
+    return {"row": 2, "address": "A2:E2"}
