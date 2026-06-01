@@ -1166,6 +1166,164 @@ async def cin7_sales_order_webhook(request: Request, token: str = ""):
     return {"status": "logged", "order": order_ref, "row": result.get("row"), "carrier": suggested_carrier}
 
 
+# ── Shopify orders/create webhook ───────────────────────────────────────────
+# Primary live trigger (Cin7 webhooks aren't available to us). Shopify calls
+# this on every new order; we extract directly from the Shopify order and
+# append a row. Same shape/columns as the Cin7 path — just an earlier trigger
+# at order-placement rather than waiting for the Cin7 sync.
+
+def _verify_shopify_hmac(body: bytes, header_hmac: str) -> bool:
+    secret = os.environ.get("SHOPIFY_API_SECRET", "")
+    if not secret or not header_hmac:
+        return False
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).digest()
+    import base64 as _b
+    expected = _b.b64encode(digest).decode()
+    return hmac.compare_digest(expected, header_hmac)
+
+
+async def _fetch_shopify_order_full(name: str) -> Optional[dict]:
+    """Single GraphQL pull of everything we need for the sheet row + carrier recompute."""
+    if not SHOPIFY_ADMIN_TOKEN:
+        return None
+    query = """
+    query($q: String!) {
+      orders(first: 1, query: $q) {
+        nodes {
+          name
+          customer { companyContactProfiles { company { name } } }
+          shippingAddress { address1 city province country zip company }
+          shippingLine { discountedPriceSet { shopMoney { amount } } }
+          lineItems(first: 50) { nodes { quantity sku variant {
+            inventoryItem { measurement { weight { value unit } } }
+          } } }
+        }
+      }
+    }
+    """
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json",
+            headers={"X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN, "Content-Type": "application/json"},
+            json={"query": query, "variables": {"q": f"name:{name}"}},
+        )
+    if r.status_code != 200:
+        return None
+    nodes = ((r.json().get("data") or {}).get("orders") or {}).get("nodes") or []
+    return nodes[0] if nodes else None
+
+
+def _company_from_shopify(o: dict) -> str:
+    """Prefer B2B company link → fall back to ship-to company → blank for B2C."""
+    profs = ((o.get("customer") or {}).get("companyContactProfiles") or [])
+    if profs and (profs[0].get("company") or {}).get("name"):
+        return profs[0]["company"]["name"]
+    ship_co = (o.get("shippingAddress") or {}).get("company") or ""
+    return ship_co
+
+
+def _cart_items_from_shopify(o: dict) -> list:
+    items = []
+    for li in (o.get("lineItems", {}) or {}).get("nodes", []):
+        v = li.get("variant") or {}
+        meas = ((v.get("inventoryItem") or {}).get("measurement") or {}).get("weight") or {}
+        kg = float(meas.get("value") or 0)
+        items.append({"grams": int(round(kg * 1000)), "quantity": int(li.get("quantity", 1)), "name": li.get("sku") or ""})
+    return items
+
+
+@app.post("/shopify/webhook/orders-create")
+async def shopify_order_created(request: Request):
+    """
+    Shopify orders/create webhook → append a row to the Freight Calculator sheet.
+    Validates HMAC against SHOPIFY_API_SECRET. Returns 200 even on internal errors
+    so Shopify doesn't retry-storm; failure detail comes back in the response body.
+    """
+    body = await request.body()
+    if not _verify_shopify_hmac(body, request.headers.get("X-Shopify-Hmac-Sha256", "")):
+        raise HTTPException(401, "invalid hmac")
+
+    try:
+        payload = json.loads(body or b"{}")
+    except Exception:
+        return {"status": "ignored", "reason": "bad_json"}
+
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return {"status": "ignored", "reason": "no_name"}
+
+    # Dedup against sheet (column B) before doing any work
+    try:
+        if cin7_sheet_log.order_already_logged(name):
+            return {"status": "skipped", "reason": "already_logged", "order": name}
+    except Exception as e:
+        return {"status": "error", "reason": "sheet_read_failed", "detail": str(e)}
+
+    # Pull the order via GraphQL — cleaner than parsing the REST webhook body
+    o = await _fetch_shopify_order_full(name)
+    if not o:
+        return {"status": "error", "reason": "shopify_order_not_found", "order": name}
+
+    company       = _company_from_shopify(o)
+    delivery_city = (o.get("shippingAddress") or {}).get("city", "")
+    sline         = (o.get("shippingLine") or {}).get("discountedPriceSet", {}).get("shopMoney", {})
+    try:
+        freight = float(sline.get("amount")) if sline.get("amount") is not None else None
+    except (TypeError, ValueError):
+        freight = None
+
+    # Recompute the suggested carrier from the cart + destination
+    suggested_carrier = ""
+    try:
+        items = _cart_items_from_shopify(o)
+        dest = {
+            "city":        delivery_city,
+            "province":    (o.get("shippingAddress") or {}).get("province", ""),
+            "country":     (o.get("shippingAddress") or {}).get("country", "NZ"),
+            "postal_code": (o.get("shippingAddress") or {}).get("zip", ""),
+            "address1":    (o.get("shippingAddress") or {}).get("address1", ""),
+        }
+        result = await live_rates.calculate_freight(items, dest, debug=False)
+        if result.get("success"):
+            suggested_carrier = result.get("chosen_carrier", "") or ""
+    except Exception:
+        suggested_carrier = ""
+
+    try:
+        res = cin7_sheet_log.append_order_row(
+            company=company, order_number=name,
+            shopify_freight=freight, suggested_carrier=suggested_carrier,
+            delivery_city=delivery_city,
+        )
+    except Exception as e:
+        return {"status": "error", "reason": "sheet_write_failed", "detail": str(e)}
+
+    return {"status": "logged", "order": name, "row": res.get("row"), "carrier": suggested_carrier}
+
+
+@app.post("/shopify/webhook/register")
+async def shopify_webhook_register(token: str = ""):
+    """
+    One-time helper: register the orders/create webhook with Shopify.
+    Hit once with ?token=<CIN7_WEBHOOK_TOKEN> (reused as a generic admin token).
+    Idempotent — if a webhook for the same topic+address already exists, it's left alone.
+    """
+    if not CIN7_WEBHOOK_TOKEN or token != CIN7_WEBHOOK_TOKEN:
+        raise HTTPException(401, "invalid token")
+    if not SHOPIFY_ADMIN_TOKEN:
+        raise HTTPException(500, "SHOPIFY_ADMIN_TOKEN not set")
+    address = f"{APP_URL.rstrip('/')}/shopify/webhook/orders-create"
+    H = {"X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN, "Content-Type": "application/json"}
+    base = f"https://{SHOPIFY_STORE}/admin/api/2024-10/webhooks.json"
+    async with httpx.AsyncClient(timeout=20) as client:
+        existing = (await client.get(base, headers=H, params={"topic": "orders/create"})).json().get("webhooks", [])
+        for w in existing:
+            if w.get("address") == address and w.get("topic") == "orders/create":
+                return {"status": "already_registered", "webhook_id": w.get("id"), "address": address}
+        r = await client.post(base, headers=H, json={"webhook": {"topic": "orders/create", "address": address, "format": "json"}})
+    return {"status": r.status_code, "response": r.json(), "address": address}
+
+
 @app.get("/cin7/webhook/sales-order/test")
 async def cin7_webhook_test(token: str = "", order_id: int = 0):
     """
