@@ -1008,6 +1008,180 @@ async def sync_product_profiles():
 @app.get("/health")
 async def health(): return {"status":"ok","version":"1.0.0"}
 
+
+# ── Cin7 → SharePoint sheet log ─────────────────────────────────────────────
+# When a Shopify-synced sales order is created in Cin7, append a row to the
+# NoEyeDeer Collections "Freight Calculator.xlsx" workbook with the company,
+# order number, Shopify freight charge, suggested carrier, and delivery city.
+# See cin7_sheet_log.py for the Graph write logic.
+
+from base64 import b64encode as _b64
+import cin7_sheet_log
+
+CIN7_USERNAME       = os.environ.get("CIN7_USERNAME", "")
+CIN7_API_KEY        = os.environ.get("CIN7_API_KEY", "")
+CIN7_WEBHOOK_TOKEN  = os.environ.get("CIN7_WEBHOOK_TOKEN", "")
+SHOPIFY_STORE       = os.environ.get("SHOPIFY_STORE", "nedcollections.myshopify.com")
+SHOPIFY_ADMIN_TOKEN = os.environ.get("SHOPIFY_ADMIN_TOKEN", "")
+
+
+def _cin7_auth_header() -> dict:
+    if not (CIN7_USERNAME and CIN7_API_KEY):
+        return {}
+    return {"Authorization": "Basic " + _b64(f"{CIN7_USERNAME}:{CIN7_API_KEY}".encode()).decode()}
+
+
+async def _fetch_cin7_sales_order(order_id: int) -> Optional[dict]:
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(
+            f"https://api.cin7.com/api/v1/SalesOrders",
+            params={"where": f"id={order_id}"},
+            headers=_cin7_auth_header(),
+        )
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    return data[0] if isinstance(data, list) and data else None
+
+
+async def _fetch_shopify_order_by_name(name: str) -> Optional[dict]:
+    """Get items + shipping address for the Shopify order, to recompute the carrier."""
+    if not SHOPIFY_ADMIN_TOKEN:
+        return None
+    query = """
+    query($q: String!) {
+      orders(first: 1, query: $q) {
+        nodes {
+          name
+          shippingAddress { address1 city province country zip }
+          lineItems(first: 50) { nodes { quantity sku variant { inventoryItem { measurement { weight { value unit } } } } } }
+        }
+      }
+    }
+    """
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json",
+            headers={"X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN, "Content-Type": "application/json"},
+            json={"query": query, "variables": {"q": f"name:{name}"}},
+        )
+    if r.status_code != 200:
+        return None
+    nodes = ((r.json().get("data") or {}).get("orders") or {}).get("nodes") or []
+    return nodes[0] if nodes else None
+
+
+async def _derive_suggested_carrier(shopify_name: str) -> str:
+    """Recompute the carrier the freight app would suggest for this order's cart."""
+    so = await _fetch_shopify_order_by_name(shopify_name)
+    if not so:
+        return ""
+    addr = so.get("shippingAddress") or {}
+    items = []
+    for li in (so.get("lineItems", {}) or {}).get("nodes", []):
+        v = li.get("variant") or {}
+        meas = ((v.get("inventoryItem") or {}).get("measurement") or {}).get("weight") or {}
+        kg = float(meas.get("value") or 0)        # value is in measurement.unit (KILOGRAMS by default)
+        grams = int(round(kg * 1000))             # weight (= CBM kg) → grams for freight calc
+        items.append({"grams": grams, "quantity": int(li.get("quantity", 1)), "name": li.get("sku") or ""})
+    dest = {
+        "city":        addr.get("city", ""),
+        "province":    addr.get("province", ""),
+        "country":     addr.get("country", "NZ"),
+        "postal_code": addr.get("zip", ""),
+        "address1":    addr.get("address1", ""),
+    }
+    result = await live_rates.calculate_freight(items, dest, debug=False)
+    return result.get("chosen_carrier", "") if result.get("success") else ""
+
+
+@app.post("/cin7/webhook/sales-order")
+async def cin7_sales_order_webhook(request: Request, token: str = ""):
+    """
+    Cin7 SalesOrder.Created webhook.
+    URL: POST /cin7/webhook/sales-order?token=<CIN7_WEBHOOK_TOKEN>
+    Body: Cin7 webhook payload (at minimum contains the SO id).
+
+    Idempotent: skips rows whose Order Number is already in the sheet.
+    Filter: only Shopify-synced orders (source / projectName).
+    Returns 200 even on internal failures (so Cin7 doesn't retry-storm); failures
+    are logged in the response body for the operator to inspect.
+    """
+    if not CIN7_WEBHOOK_TOKEN or token != CIN7_WEBHOOK_TOKEN:
+        raise HTTPException(401, "invalid webhook token")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    # Cin7 payloads vary; accept several common id keys
+    order_id = (
+        payload.get("salesOrderId") or payload.get("SalesOrderId")
+        or payload.get("id") or payload.get("Id")
+    )
+    if not order_id:
+        return {"status": "ignored", "reason": "no_order_id", "payload_keys": list(payload.keys())}
+
+    order = await _fetch_cin7_sales_order(order_id)
+    if not order:
+        return {"status": "error", "reason": "cin7_fetch_failed", "id": order_id}
+
+    # Filter: Shopify-synced orders only (source = "Shopify NedCollectionsNZ").
+    source = (order.get("source") or order.get("projectName") or "").lower()
+    if "shopify" not in source:
+        return {"status": "ignored", "reason": "not_shopify_synced", "source": source}
+
+    order_ref     = (order.get("reference") or "").strip()
+    company       = order.get("company") or order.get("billingCompany") or ""
+    delivery_city = order.get("deliveryCity") or ""
+    freight       = order.get("freightTotal")
+
+    # Idempotency: skip if already in the sheet
+    try:
+        if order_ref and cin7_sheet_log.order_already_logged(order_ref):
+            return {"status": "skipped", "reason": "already_logged", "order": order_ref}
+    except Exception as e:
+        return {"status": "error", "reason": "sheet_read_failed", "detail": str(e)}
+
+    # Recompute the suggested carrier by replaying the freight calc on the Shopify cart
+    suggested_carrier = ""
+    if order_ref:
+        try:
+            suggested_carrier = await _derive_suggested_carrier(order_ref)
+        except Exception:
+            suggested_carrier = ""
+
+    try:
+        result = cin7_sheet_log.append_order_row(
+            company=company,
+            order_number=order_ref,
+            shopify_freight=freight,
+            suggested_carrier=suggested_carrier,
+            delivery_city=delivery_city,
+        )
+    except Exception as e:
+        return {"status": "error", "reason": "sheet_write_failed", "detail": str(e)}
+
+    return {"status": "logged", "order": order_ref, "row": result.get("row"), "carrier": suggested_carrier}
+
+
+@app.get("/cin7/webhook/sales-order/test")
+async def cin7_webhook_test(token: str = "", order_id: int = 0):
+    """
+    Manual dry-run: ?token=<X>&order_id=<Cin7 SO id>.
+    Same logic as the webhook but triggered manually for testing. Use this
+    to verify a real order writes correctly before registering the Cin7 webhook.
+    """
+    if not CIN7_WEBHOOK_TOKEN or token != CIN7_WEBHOOK_TOKEN:
+        raise HTTPException(401, "invalid webhook token")
+    if not order_id:
+        raise HTTPException(400, "order_id required")
+    # Simulate the webhook by calling the same path with a synthetic payload
+    class _Req:
+        async def json(self): return {"id": order_id}
+    return await cin7_sales_order_webhook(_Req(), token=token)
+
 static_dir = BASE_DIR / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
