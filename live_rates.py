@@ -199,29 +199,38 @@ def _cube_dimensions_cm(weight_kg: float) -> tuple:
     return (round(side_cm, 1), round(side_cm, 1), round(side_cm, 1))
 
 
+# Cap any single package sent to GSS — beyond ~1m³ couriers won't quote
+# sensibly. Larger carts are split across multiple cartons of equal volume.
+_MAX_CARTON_CBM = 1.0
+
+
 def _build_packages(items: list) -> list:
     """
-    Convert Shopify cart items into GoSweetSpot package list.
-    Each item with quantity N → N separate packages.
-    Item weight comes from Shopify (we set it = CBM in kg).
+    Consolidate the entire cart into a small number of equal-sized cartons
+    (capped at _MAX_CARTON_CBM each), rather than sending one parcel per
+    cart line × quantity.
+
+    Real-world fulfilment packs multiple units per carton, but the previous
+    "one-parcel-per-unit" approach hit GSS's per-parcel minimums (~$8 each):
+    a 24-unit ACSR cart quoted $206 via Post Haste even though the warehouse
+    actually ships it as 2 cartons quoted at $30 on Castle Parcels' portal.
+    Consolidating matches what the warehouse does and produces realistic
+    courier quotes. MF/DF already price on total volume, so they're unaffected.
     """
-    pkgs = []
-    for item in items:
-        qty = int(item.get("quantity", 1))
-        # Shopify carrier service sends "grams" (in cart payload it's the line item's grams field per unit)
-        grams = float(item.get("grams", 0) or 0)
-        weight_kg = grams / 1000.0
-        if weight_kg <= 0:
-            weight_kg = 0.001  # 1g fallback
-        L, W, H = _cube_dimensions_cm(weight_kg)
-        for _ in range(qty):
-            pkgs.append({
-                "Name": "Carton",
-                "Length": L, "Width": W, "Height": H,
-                "Kg": round(weight_kg, 3),
-                "Type": "Box",
-            })
-    return pkgs
+    total_kg = sum(
+        (float(item.get("grams", 0) or 0) / 1000.0) * int(item.get("quantity", 1))
+        for item in items
+    )
+    if total_kg <= 0:
+        # Empty/zero-weight cart — single tiny placeholder so GSS doesn't error
+        return [{"Name": "Carton", "Length": 5, "Width": 5, "Height": 5, "Kg": 0.001, "Type": "Box"}]
+
+    n_cartons = max(1, math.ceil(total_kg / _MAX_CARTON_CBM))
+    kg_per_carton = total_kg / n_cartons
+    L, W, H = _cube_dimensions_cm(kg_per_carton)
+    carton = {"Name": "Carton", "Length": L, "Width": W, "Height": H,
+              "Kg": round(kg_per_carton, 3), "Type": "Box"}
+    return [dict(carton) for _ in range(n_cartons)]
 
 
 def _total_cbm(items: list) -> float:
