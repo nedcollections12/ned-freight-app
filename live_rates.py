@@ -203,30 +203,42 @@ def _cube_dimensions_cm(weight_kg: float) -> tuple:
 # sensibly. Larger carts are split across multiple cartons of equal volume.
 _MAX_CARTON_CBM = 1.0
 
+# Packing factor: real cartons are larger than the raw sum of item CBMs
+# (carton walls, items don't tessellate perfectly, void fill, etc.).
+# Without this, GSS quotes a tiny cube using the raw cart CBM and undercuts
+# the portal price — which is the price NED actually pays. 1.6 was derived
+# empirically from the 24× ACSR case (warehouse ships 2 cartons at 0.0784 m³
+# total vs raw item sum of 0.048 m³ = ratio 1.63). Tunable via PACKING_FACTOR
+# env var if a category turns out to pack more or less efficiently.
+_PACKING_FACTOR = float(os.environ.get("PACKING_FACTOR", "1.6"))
+
 
 def _build_packages(items: list) -> list:
     """
     Consolidate the entire cart into a small number of equal-sized cartons
-    (capped at _MAX_CARTON_CBM each), rather than sending one parcel per
-    cart line × quantity.
+    (capped at _MAX_CARTON_CBM each, after applying the packing factor) and
+    send those to GoSweetSpot — rather than one parcel per cart line × qty.
 
-    Real-world fulfilment packs multiple units per carton, but the previous
+    Real-world fulfilment packs multiple units per carton; the previous
     "one-parcel-per-unit" approach hit GSS's per-parcel minimums (~$8 each):
     a 24-unit ACSR cart quoted $206 via Post Haste even though the warehouse
     actually ships it as 2 cartons quoted at $30 on Castle Parcels' portal.
-    Consolidating matches what the warehouse does and produces realistic
-    courier quotes. MF/DF already price on total volume, so they're unaffected.
+
+    On top of consolidation we scale the volume by _PACKING_FACTOR so GSS sees
+    realistic *packed* dimensions, not the raw item CBM sum — without this we
+    under-quote and end up cheaper than the portal price NED actually pays.
+    MF/DF formulas are calibrated against raw cart CBM so they're unaffected.
     """
-    total_kg = sum(
+    raw_kg = sum(
         (float(item.get("grams", 0) or 0) / 1000.0) * int(item.get("quantity", 1))
         for item in items
     )
-    if total_kg <= 0:
-        # Empty/zero-weight cart — single tiny placeholder so GSS doesn't error
+    if raw_kg <= 0:
         return [{"Name": "Carton", "Length": 5, "Width": 5, "Height": 5, "Kg": 0.001, "Type": "Box"}]
 
-    n_cartons = max(1, math.ceil(total_kg / _MAX_CARTON_CBM))
-    kg_per_carton = total_kg / n_cartons
+    packed_kg = raw_kg * _PACKING_FACTOR
+    n_cartons = max(1, math.ceil(packed_kg / _MAX_CARTON_CBM))
+    kg_per_carton = packed_kg / n_cartons
     L, W, H = _cube_dimensions_cm(kg_per_carton)
     carton = {"Name": "Carton", "Length": L, "Width": W, "Height": H,
               "Kg": round(kg_per_carton, 3), "Type": "Box"}
