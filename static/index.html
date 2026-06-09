@@ -336,7 +336,7 @@ Customer sees one clean shipping option</div>
   <section class="tab" id="tab-ratelog">
     <div class="card">
       <h2>Rate log</h2>
-      <p class="hint">Every rate quoted at checkout, newest first. Cross-reference against a Shopify order using the customer/company, address and time. <b>CP?</b> = whether a live Castle Parcels / courier quote was returned (× means it fell back to formula freight).</p>
+      <p class="hint">Every rate quoted at checkout, newest first. Cross-reference against a Shopify order using the customer/company, address and time. The <b>Carriers</b> column shows which of CP (Castle Parcels), MF (Mainfreight) and DF (Dailyfreight) quoted, and whether it was a <b>live API</b> quote (● green) or a <b>rate-card formula</b> fallback (◦ amber). Grey – means that carrier returned no quote.</p>
       <div class="row" style="margin-bottom:12px; align-items:center;">
         <label style="font-size:13px;color:#374151;">Show
           <select id="rl-limit">
@@ -412,6 +412,15 @@ function renderRateLog() {
     const c = map[status] || ['#374151','#f3f4f6'];
     return '<span title="'+_esc(err||'')+'" style="background:'+c[1]+';color:'+c[0]+';padding:2px 7px;border-radius:10px;font-size:11px;white-space:nowrap;">'+_esc(status||'')+'</span>';
   };
+  const pill = (label, src) => {
+    // src: 'live' (green) | 'formula' (amber) | null (grey, didn't quote)
+    const styles = {live:['#065f46','#d1fae5'], formula:['#92400e','#fef3c7'], none:['#9ca3af','#f3f4f6']};
+    const c = styles[src || 'none'];
+    const tip = src === 'live' ? 'live API' : src === 'formula' ? 'rate-card formula' : 'no quote';
+    return '<span title="'+label+': '+tip+'" style="display:inline-block;background:'+c[1]+';color:'+c[0]+
+           ';padding:1px 5px;border-radius:8px;font-size:10.5px;margin:1px;white-space:nowrap;">'+label+(src==='live'?' ●':src==='formula'?' ◦':' –')+'</span>';
+  };
+  const carriers = s => { s = s || {}; return pill('CP', s.cp) + pill('MF', s.mf) + pill('DF', s.df); };
   const body = rows.map(r => `
     <tr>
       <td style="white-space:nowrap;">${fmtTime(r.ts)}</td>
@@ -421,24 +430,25 @@ function renderRateLog() {
       <td class="num">${r.cart_cbm!=null ? Number(r.cart_cbm).toFixed(3) : ''}</td>
       <td>${_esc(r.carrier)||'<span style="color:#9ca3af">—</span>'}${r.service?'<br><span style="color:#9ca3af;font-size:11px;">'+_esc(r.service)+'</span>':''}</td>
       <td class="num">${r.rate!=null ? '$'+Number(r.rate).toFixed(2) : ''}</td>
-      <td style="text-align:center;">${r.cp_available ? '<span style="color:#16a34a;font-weight:600;">✓</span>' : '<span style="color:#dc2626;">×</span>'}</td>
+      <td style="white-space:nowrap;">${carriers(r.sources)}</td>
       <td>${badge(r.status, r.error)}</td>
     </tr>`).join('');
   document.getElementById('ratelog-wrap').innerHTML = `
     <div class="table-wrap"><table class="rate-table">
       <thead><tr>
         <th>Time</th><th>Customer</th><th>Company</th><th>Address</th>
-        <th class="num">CBM</th><th>Carrier</th><th class="num">Rate</th><th>CP?</th><th>Status</th>
+        <th class="num">CBM</th><th>Carrier</th><th class="num">Rate</th><th>Carriers (●live ◦formula)</th><th>Status</th>
       </tr></thead>
       <tbody>${body}</tbody>
     </table></div>`;
 }
 
 function downloadRateLogCsv() {
-  const cols = ['ts','customer','company','address1','city','postcode','province','country','cart_cbm','order_value','carrier','service','rate','cp_available','status','error'];
+  const cols = ['ts','customer','company','address1','city','postcode','province','country','cart_cbm','order_value','carrier','service','rate','status','cp_src','mf_src','df_src','error'];
   const cell = v => '"' + String(v==null?'':v).replace(/"/g,'""') + '"';
+  const val = (r,c) => (c==='cp_src'||c==='mf_src'||c==='df_src') ? ((r.sources||{})[c.slice(0,2)]||'') : r[c];
   const csv = [cols.join(',')].concat(
-    _rateLogRows.map(r => cols.map(c => cell(r[c])).join(','))
+    _rateLogRows.map(r => cols.map(c => cell(val(r,c))).join(','))
   ).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));

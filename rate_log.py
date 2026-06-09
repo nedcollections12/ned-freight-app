@@ -82,6 +82,27 @@ def _cp_available(quotes) -> bool:
     )
 
 
+def _carrier_sources(quotes) -> dict:
+    """
+    Per-carrier source for the log: 'live' | 'formula' | None (didn't quote).
+    - CP (Castle Parcels/Post Haste/Kiwi) is always a live GSS quote.
+    - MF/DF are 'live' if their quote came from the Mainfreight Rating API,
+      else 'formula' (rate-card fallback).
+    """
+    src = {"cp": None, "mf": None, "df": None}
+    for q in (quotes or []):
+        carrier = (q.get("carrier") or "")
+        source = (q.get("_source") or "")
+        live = ("Rating API" in source) or ("live" in source.lower())
+        if any(t in carrier for t in ("Haste", "Castle", "Kiwi")):
+            src["cp"] = "live"
+        elif carrier == "Mainfreight":
+            src["mf"] = "live" if live else "formula"
+        elif carrier == "Dailyfreight":
+            src["df"] = "live" if live else "formula"
+    return src
+
+
 def log_rate(*, destination=None, items=None, result=None,
              status="quoted", rate=None, error=None) -> None:
     """Best-effort insert of one rate event. Never raises."""
@@ -137,6 +158,8 @@ def recent(limit: int = 200) -> list:
                     row["quotes"] = json.loads(row["quotes"])
                 except Exception:
                     row["quotes"] = None
+            # Derived per-carrier source (live vs formula) for the log UI
+            row["sources"] = _carrier_sources(row.get("quotes"))
             out.append(row)
         return out
     except Exception:

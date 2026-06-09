@@ -39,6 +39,13 @@ GSS_ACCESS_KEY = os.environ.get("GSS_ACCESS_KEY", "")
 GSS_SITE_ID    = os.environ.get("GSS_SITE_ID", "")
 GSS_URL        = "https://api.gosweetspot.com/api/rates"
 
+# Mainfreight Rating API — covers both Dailyfreight (LCL) and Mainfreight (M2H)
+# via the same endpoint with different account/serviceLevel codes.
+MAINFREIGHT_API_KEY = os.environ.get("MAINFREIGHT_API_KEY", "")
+MAINFREIGHT_URL     = "https://api.mainfreight.com/transport/1.0/customer/rate?region=NZ"
+MF_ACCOUNT_DF = "NEDCOLDF"   # Ned Collections Dailyfreight (LCL)
+MF_ACCOUNT_MF = "NEDCOLCHC"  # Ned Collections Mainfreight 2 Home (M2H)
+
 ORIGIN = {
     "Name": "NED Collections Warehouse",
     "Address": {
@@ -441,6 +448,111 @@ def quote_dailyfreight(cart_cbm: float, destination: dict, override_key: Optiona
     }
 
 
+import datetime as _datetime
+
+
+def _next_business_day_iso() -> str:
+    d = _datetime.date.today() + _datetime.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += _datetime.timedelta(days=1)
+    return f"{d.isoformat()}T09:00:00"
+
+
+async def _mainfreight_rate(account: str, service: str, destination: dict,
+                            packed_cbm: float) -> Optional[float]:
+    """
+    Call Mainfreight Rating API for one account/service combo.
+    Returns TotalIncludingGSTAmount (carrier-billed price incl FAF + GST), or None.
+    """
+    if not MAINFREIGHT_API_KEY:
+        return None
+    pc = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    city = (destination.get("city") or "").strip()
+    if not (city and pc):
+        return None  # Mainfreight requires both city and postcode for NZ
+
+    body = {
+        "account":      {"code": account},
+        "serviceLevel": {"code": service},
+        "origin": {
+            "freightRequiredDateTime":     _next_business_day_iso(),
+            "freightRequiredDateTimeZone": "New Zealand Standard Time",
+            "address": {
+                "suburb":      ORIGIN["Address"]["Suburb"],
+                "city":        ORIGIN["Address"]["City"],
+                "postCode":    ORIGIN["Address"]["PostCode"],
+                "countryCode": ORIGIN["Address"]["CountryCode"],
+            }
+        },
+        "destination": {
+            "address": {
+                "suburb":      city,
+                "city":        city,
+                "postCode":    pc,
+                "countryCode": destination.get("country", "NZ") or "NZ",
+            }
+        },
+        "freightDetails": [{
+            "units":        1,
+            "packTypeCode": "CTN",
+            # Real weight is unknown (Shopify weight = CBM in our convention); send a
+            # placeholder of 1 kg and let MF compute on dimensional weight from volume.
+            "weight":       1,
+            "volume":       round(max(packed_cbm, 0.001), 4),
+        }],
+    }
+    H = {
+        "Authorization": f"Secret {MAINFREIGHT_API_KEY}",
+        "Content-Type":  "application/json",
+        "Accept":        "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=7.0) as client:
+            r = await client.post(MAINFREIGHT_URL, headers=H, json=body)
+        if r.status_code != 200:
+            return None
+        for c in r.json().get("charges", []):
+            if c.get("name") == "TotalIncludingGSTAmount":
+                return float(c.get("value", 0))
+    except Exception:
+        return None
+    return None
+
+
+# NOTE: live MF/DF quotes use RAW cart CBM, NOT packed. The _PACKING_FACTOR is a
+# GoSweetSpot/courier concept (GSS prices a parcel cube, so we inflate raw → packed
+# to match real cartons). Mainfreight/Dailyfreight price on declared consignment
+# volume, and their rate cards (the formula fallbacks) are calibrated on raw cart
+# CBM — so live(raw) tracks the formula within ~2.4%, whereas live(packed) overshot
+# by up to ~64% on large carts. Verified 2026-06-10 across ChCh/Auckland/Wānaka/
+# Whanganui at 0.03–1.89 m³.
+
+async def quote_dailyfreight_live(cart_cbm: float, destination: dict) -> Optional[dict]:
+    """Live Dailyfreight LCL quote via Mainfreight Rating API (NEDCOLDF account)."""
+    cost = await _mainfreight_rate(MF_ACCOUNT_DF, "LCL", destination, cart_cbm)
+    if cost is None:
+        return None
+    return {
+        "carrier":  "Dailyfreight",
+        "service":  "LCL Palletised",
+        "raw_cost": round(cost, 2),  # already incl FAF + GST per API response
+        "_source":  f"Mainfreight Rating API (live) — NEDCOLDF/LCL @ {cart_cbm:.3f}m³",
+    }
+
+
+async def quote_mainfreight_live(cart_cbm: float, destination: dict) -> Optional[dict]:
+    """Live Mainfreight M2H quote via Mainfreight Rating API (NEDCOLCHC account)."""
+    cost = await _mainfreight_rate(MF_ACCOUNT_MF, "M2H", destination, cart_cbm)
+    if cost is None:
+        return None
+    return {
+        "carrier":  "Mainfreight",
+        "service":  "M2H Two-Man",
+        "raw_cost": round(cost, 2),  # already incl FAF + GST per API response
+        "_source":  f"Mainfreight Rating API (live) — NEDCOLCHC/M2H @ {cart_cbm:.3f}m³",
+    }
+
+
 async def calculate_freight(items: list, destination: dict, debug: bool = False) -> dict:
     """
     Main entry: get quotes from all three carriers, pick cheapest, apply markup.
@@ -449,18 +561,25 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     cart_cbm = _total_cbm(items)
     quotes = []
 
-    # Castle Parcels (live)
-    cp = await quote_castle_parcels(items, destination)
+    # Fire CP (GSS) + live MF + live DF in parallel — they're independent network
+    # calls and serial awaits would triple the checkout latency.
+    import asyncio as _asyncio
+    cp, mf_live, df_live = await _asyncio.gather(
+        quote_castle_parcels(items, destination),
+        quote_mainfreight_live(cart_cbm, destination),
+        quote_dailyfreight_live(cart_cbm, destination),
+    )
     if cp:
         quotes.append(cp)
 
-    # Mainfreight (formula)
-    mf = quote_mainfreight(cart_cbm, destination)
+    # Mainfreight — live API preferred; formula is the resilient fallback so a
+    # GSS/MF outage can never produce no_carrier_match for a known destination.
+    mf = mf_live or quote_mainfreight(cart_cbm, destination)
     if mf:
         quotes.append(mf)
 
-    # Dailyfreight (formula)
-    df = quote_dailyfreight(cart_cbm, destination)
+    # Dailyfreight — same pattern.
+    df = df_live or quote_dailyfreight(cart_cbm, destination)
     if df:
         quotes.append(df)
 
