@@ -17,6 +17,7 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from zones import detect_zone, get_oversized_zone
 import live_rates  # Live carrier-rate calculation (CP/MF/DF)
+import rate_log     # Persistent log of every rate quote (SQLite on Render disk)
 
 # Free-shipping threshold — orders ≥ this get free freight
 FREE_SHIPPING_THRESHOLD = float(os.environ.get("FREE_SHIPPING_THRESHOLD", "500"))
@@ -107,6 +108,8 @@ async def shopify_rates(request: Request):
 
     # Free shipping over threshold
     if order_value >= FREE_SHIPPING_THRESHOLD:
+        rate_log.log_rate(destination=destination, items=items, result=None,
+                          status="free_shipping", rate=0.0)
         return {"rates": [{
             "service_name": "Free Shipping",
             "service_code": "FREE",
@@ -115,8 +118,8 @@ async def shopify_rates(request: Request):
             "description":  f"Free freight on orders over ${int(FREE_SHIPPING_THRESHOLD)}"
         }]}
 
-    # Live carrier quote
-    result = await live_rates.calculate_freight(items, destination)
+    # Live carrier quote (debug=True so the rate log captures the full carrier breakdown)
+    result = await live_rates.calculate_freight(items, destination, debug=True)
 
     rates_out = []
 
@@ -132,6 +135,9 @@ async def shopify_rates(request: Request):
 
     if not result.get("success"):
         # No carrier matched — only show pickup (if available) or "Contact us"
+        rate_log.log_rate(destination=destination, items=items, result=result,
+                          status="no_carrier_match", rate=None,
+                          error=result.get("error"))
         if not rates_out:
             rates_out.append({
                 "service_name": "Freight — Contact Us",
@@ -143,7 +149,10 @@ async def shopify_rates(request: Request):
         return {"rates": rates_out}
 
     # Round customer price up to nearest dollar for a clean display
-    price_cents = int(math.ceil(result["customer_price"]) * 100)
+    display_price = float(math.ceil(result["customer_price"]))
+    price_cents = int(display_price * 100)
+    rate_log.log_rate(destination=destination, items=items, result=result,
+                      status="quoted", rate=display_price)
     rates_out.append({
         "service_name": "Standard Delivery",
         "service_code": "NED_LIVE",
@@ -206,6 +215,12 @@ async def api_quote(
     items = [{"grams": int(cbm * 1000), "quantity": qty, "price": 5000}]  # weight = CBM in kg → grams
     destination = {"city": city, "country": "NZ", "postal_code": ""}
     return await live_rates.calculate_freight(items, destination, debug=True)
+
+
+@app.get("/api/rate-log")
+async def api_rate_log(limit: int = 200):
+    """Recent rate quotes (newest first) for the Rate Log admin tab."""
+    return {"entries": rate_log.recent(limit)}
 
 
 @app.post("/api/reload-rates")

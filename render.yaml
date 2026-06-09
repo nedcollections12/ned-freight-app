@@ -12,9 +12,15 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
     healthCheckPath: /health # lets Render auto-restart a hung instance (the recurring overcharge cause)
+    disk:                    # persistent storage for the rate-quote log (SQLite); survives deploys
+      name: rate-log
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PORT
         value: 10000
+      - key: RATE_LOG_DIR    # rate_log.py writes rate_log.db here (the mounted disk)
+        value: /var/data
 
       # ── Non-secret config (safe to commit) ──────────────────────────────
       - key: GSS_SITE_ID            # site with the FULL carrier set; do not change

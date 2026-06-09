@@ -13,3 +13,10 @@ __pycache__/
 
 # Shopify auth token (persisted by /shopify/callback)
 data/shopify_token.json
+
+# Rate-log SQLite DB (runtime data — lives on the Render disk in prod)
+*.db
+
+# Local virtualenv
+.venv/
+venv/

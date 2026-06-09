@@ -119,6 +119,7 @@
   <button class="active" data-tab="cbm">Product CBMs</button>
   <button data-tab="tester">Test a quote</button>
   <button data-tab="carriers">Carrier rate cards</button>
+  <button data-tab="ratelog">Rate log</button>
   <button data-tab="docs">How it works</button>
 </nav>
 
@@ -330,6 +331,30 @@ Customer sees one clean shipping option</div>
       </div>
     </div>
   </section>
+
+  <!-- TAB: Rate Log -->
+  <section class="tab" id="tab-ratelog">
+    <div class="card">
+      <h2>Rate log</h2>
+      <p class="hint">Every rate quoted at checkout, newest first. Cross-reference against a Shopify order using the customer/company, address and time. <b>CP?</b> = whether a live Castle Parcels / courier quote was returned (× means it fell back to formula freight).</p>
+      <div class="row" style="margin-bottom:12px; align-items:center;">
+        <label style="font-size:13px;color:#374151;">Show
+          <select id="rl-limit">
+            <option value="100">100</option>
+            <option value="250" selected>250</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+          </select>
+        </label>
+        <input type="search" id="rl-search" placeholder="Filter by customer, company, city, carrier…">
+        <button class="btn btn-secondary" onclick="loadRateLog()">Refresh</button>
+        <button class="btn btn-secondary" onclick="downloadRateLogCsv()">Export CSV</button>
+        <label style="font-size:13px;color:#374151;"><input type="checkbox" id="rl-auto" checked> Auto-refresh</label>
+        <span id="rl-meta" class="hint" style="margin-left:auto;"></span>
+      </div>
+      <div id="ratelog-wrap" class="loading">Loading rate log…</div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -345,8 +370,96 @@ document.querySelectorAll('nav button').forEach(btn => {
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'cbm' && allVariants.length === 0) loadCbm();
     if (btn.dataset.tab === 'carriers' && !window._carriersLoaded) loadCarriers();
+    if (btn.dataset.tab === 'ratelog') loadRateLog();
   });
 });
+
+// ── Rate log tab ──────────────────────────────────────────────────────────
+let _rateLogRows = [];
+function _esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadRateLog() {
+  const wrap = document.getElementById('ratelog-wrap');
+  const limit = document.getElementById('rl-limit').value;
+  if (!_rateLogRows.length) wrap.className = 'loading';
+  try {
+    const r = await fetch('/api/rate-log?limit=' + limit);
+    const data = await r.json();
+    _rateLogRows = data.entries || [];
+    wrap.className = '';
+    renderRateLog();
+    document.getElementById('rl-meta').textContent =
+      _rateLogRows.length + ' quotes · updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    wrap.innerHTML = 'Failed to load: ' + _esc(e.message);
+  }
+}
+
+function renderRateLog() {
+  const q = (document.getElementById('rl-search').value || '').toLowerCase().trim();
+  const rows = q
+    ? _rateLogRows.filter(r => [r.customer,r.company,r.city,r.carrier,r.status,r.postcode]
+        .some(v => (v||'').toLowerCase().includes(q)))
+    : _rateLogRows;
+  if (!rows.length) {
+    document.getElementById('ratelog-wrap').innerHTML =
+      '<p class="hint">No rate quotes logged yet' + (q ? ' for “'+_esc(q)+'”' : '') + '.</p>';
+    return;
+  }
+  const fmtTime = ts => { try { return new Date(ts).toLocaleString('en-NZ',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); } catch(_) { return ts||''; } };
+  const badge = (status, err) => {
+    const map = {quoted:['#065f46','#d1fae5'], free_shipping:['#1e40af','#dbeafe'], no_carrier_match:['#92400e','#fef3c7'], error:['#991b1b','#fee2e2']};
+    const c = map[status] || ['#374151','#f3f4f6'];
+    return '<span title="'+_esc(err||'')+'" style="background:'+c[1]+';color:'+c[0]+';padding:2px 7px;border-radius:10px;font-size:11px;white-space:nowrap;">'+_esc(status||'')+'</span>';
+  };
+  const body = rows.map(r => `
+    <tr>
+      <td style="white-space:nowrap;">${fmtTime(r.ts)}</td>
+      <td>${_esc(r.customer)||'<span style="color:#9ca3af">—</span>'}</td>
+      <td>${_esc(r.company)||'<span style="color:#9ca3af">—</span>'}</td>
+      <td>${_esc([r.address1, r.city, r.postcode, r.province].filter(Boolean).join(', '))}</td>
+      <td class="num">${r.cart_cbm!=null ? Number(r.cart_cbm).toFixed(3) : ''}</td>
+      <td>${_esc(r.carrier)||'<span style="color:#9ca3af">—</span>'}${r.service?'<br><span style="color:#9ca3af;font-size:11px;">'+_esc(r.service)+'</span>':''}</td>
+      <td class="num">${r.rate!=null ? '$'+Number(r.rate).toFixed(2) : ''}</td>
+      <td style="text-align:center;">${r.cp_available ? '<span style="color:#16a34a;font-weight:600;">✓</span>' : '<span style="color:#dc2626;">×</span>'}</td>
+      <td>${badge(r.status, r.error)}</td>
+    </tr>`).join('');
+  document.getElementById('ratelog-wrap').innerHTML = `
+    <div class="table-wrap"><table class="rate-table">
+      <thead><tr>
+        <th>Time</th><th>Customer</th><th>Company</th><th>Address</th>
+        <th class="num">CBM</th><th>Carrier</th><th class="num">Rate</th><th>CP?</th><th>Status</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>`;
+}
+
+function downloadRateLogCsv() {
+  const cols = ['ts','customer','company','address1','city','postcode','province','country','cart_cbm','order_value','carrier','service','rate','cp_available','status','error'];
+  const cell = v => '"' + String(v==null?'':v).replace(/"/g,'""') + '"';
+  const csv = [cols.join(',')].concat(
+    _rateLogRows.map(r => cols.map(c => cell(r[c])).join(','))
+  ).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+  a.download = 'ned-rate-log-' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const s = document.getElementById('rl-search');
+  if (s) s.addEventListener('input', renderRateLog);
+  const lim = document.getElementById('rl-limit');
+  if (lim) lim.addEventListener('change', loadRateLog);
+});
+
+// Auto-refresh the rate log every 20s while its tab is open and the box is ticked
+setInterval(() => {
+  const onTab = document.getElementById('tab-ratelog').classList.contains('active');
+  const auto = document.getElementById('rl-auto');
+  if (onTab && auto && auto.checked) loadRateLog();
+}, 20000);
 
 // Carriers tab
 async function loadCarriers() {
