@@ -1,12 +1,69 @@
+# Render deployment descriptor for ned-freight-app.
+# NOTE: this service was created manually in the Render dashboard, so this file
+# is currently documentation + a blueprint for re-creation. If you adopt it as a
+# Render Blueprint, the inline `value` vars below become the source of truth and
+# `sync: false` vars stay dashboard-managed (secrets — never commit their values).
 services:
   - type: web
     name: ned-freight-app
     runtime: python
-    # NOTE: Free tier sleeps after 15min idle → 30-40s cold-start wake-up.
-    # For production: upgrade to "Starter" ($7/mo) in Render dashboard to keep app warm 24/7.
+    plan: starter            # keep warm 24/7 — free tier cold-starts blow Shopify's ~10s window
+    region: singapore        # closest Render region to NZ; GSS API latency is real (see 9s timeout in live_rates.py)
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
-    healthCheckPath: /health
+    healthCheckPath: /health # lets Render auto-restart a hung instance (the recurring overcharge cause)
     envVars:
       - key: PORT
         value: 10000
+
+      # ── Non-secret config (safe to commit) ──────────────────────────────
+      - key: GSS_SITE_ID            # site with the FULL carrier set; do not change
+        value: "3658643"
+      - key: ORIGIN_STREET
+        value: 7 Paradyne Place
+      - key: ORIGIN_SUBURB          # warehouse (Wigram), NOT showroom — blank/wrong zeroes out GSS
+        value: Wigram
+      - key: ORIGIN_CITY
+        value: Christchurch
+      - key: ORIGIN_POSTCODE
+        value: "8042"
+      - key: ORIGIN_COUNTRY
+        value: NZ
+      - key: FAF_MULTIPLIER
+        value: "1.30"
+      - key: GST_MULTIPLIER
+        value: "1.15"
+      - key: NED_MARKUP
+        value: "1.10"
+      - key: PACKING_FACTOR
+        value: "1.6"
+      - key: FREE_SHIPPING_THRESHOLD
+        value: "999999"
+      - key: SHOPIFY_STORE
+        value: nedcollections.myshopify.com
+      - key: APP_URL
+        value: https://ned-freight-app.onrender.com
+
+      # ── Secrets (set in Render dashboard — values never committed) ───────
+      - key: GSS_ACCESS_KEY
+        sync: false
+      - key: MAINFREIGHT_API_KEY
+        sync: false
+      - key: SHOPIFY_ADMIN_TOKEN
+        sync: false
+      - key: SHOPIFY_API_KEY
+        sync: false
+      - key: SHOPIFY_API_SECRET
+        sync: false
+      - key: CIN7_USERNAME
+        sync: false
+      - key: CIN7_API_KEY
+        sync: false
+      - key: CIN7_WEBHOOK_TOKEN
+        sync: false
+      - key: MSSHEET_CLIENT_ID
+        sync: false
+      - key: MSSHEET_TENANT_ID
+        sync: false
+      - key: MSSHEET_CLIENT_SECRET
+        sync: false

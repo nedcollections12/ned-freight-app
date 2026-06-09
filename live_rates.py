@@ -13,6 +13,7 @@ All amounts NZD.
 """
 
 import json
+import logging
 import math
 import os
 import unicodedata
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+
+logger = logging.getLogger("ned_freight")
 
 
 def _strip_diacritics(s: str) -> str:
@@ -309,21 +312,33 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
         "Content-Type": "application/json",
     }
 
+    # Single attempt, no retry: a retry could stack to ~18s and blow Shopify's
+    # ~10s carrier-service window (which makes checkout show NO rate at all).
+    # 9s catches GoSweetSpot's slow tail — inter-region lanes return more carriers
+    # and are slower from our Singapore region — while leaving ~1s headroom for
+    # the instant MF/DF formulas + serialization. The app is hosted far from the
+    # NZ GSS API, so a too-tight timeout silently drops Castle Parcels on slow
+    # lanes and falls back to the expensive palletised formula (the recurring
+    # overcharge bug). Every drop below is logged so the failure is visible.
+    _dest_label = f"{dest_payload['Address']['Suburb']} {dest_payload['Address']['PostCode']}".strip()
     try:
-        # 7s: catches GSS's slow tail while staying under Shopify's ~10s
-        # carrier-service window (MF/DF + serialization are instant, so the
-        # rest of the request needs only ~1s of that budget).
-        async with httpx.AsyncClient(timeout=7.0) as client:
+        async with httpx.AsyncClient(timeout=9.0) as client:
             r = await client.post(GSS_URL, json=payload, headers=headers)
         if r.status_code != 200:
+            logger.warning("GSS dropped CP for %s: HTTP %s — falling back to MF/DF formula",
+                           _dest_label, r.status_code)
             return None
         data = r.json()
-    except Exception:
+    except Exception as e:
         # GSS timeout/error → fall back to MF/DF formulas (instant)
+        logger.warning("GSS dropped CP for %s: %s: %s — falling back to MF/DF formula",
+                       _dest_label, type(e).__name__, e)
         return None
 
     options = data.get("Available", [])
     if not options:
+        logger.warning("GSS dropped CP for %s: no Available options (rejected=%s) — falling back to MF/DF formula",
+                       _dest_label, len(data.get("Rejected", [])))
         return None
 
     # SAFETY FILTER: drop suspiciously low quotes for large items.
@@ -341,7 +356,10 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     ]
     if not filtered:
         # All GSS quotes are unrealistic for this cart — skip CP entirely
-        # so the cheapest of MF/DF (formula-based) gets picked.
+        # so the cheapest of MF/DF (formula-based) gets picked. This is expected
+        # for genuinely large carts; logged at INFO (not a fault).
+        logger.info("GSS quotes below safety threshold ($%.2f/m³ floor) for %s — using MF/DF",
+                    threshold, _dest_label)
         return None
     options = filtered
 
