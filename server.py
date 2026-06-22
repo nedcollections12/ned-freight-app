@@ -189,6 +189,66 @@ def _is_canterbury(destination: dict) -> bool:
     return False
 
 
+@app.post("/shopify/rates-b2b")
+async def shopify_rates_b2b(request: Request):
+    """
+    B2B Carrier Service callback — returns rates ex-GST (÷ 1.15).
+    Used for B2B markets with ADD_TAXES_AT_CHECKOUT: Shopify adds 15% GST back
+    at checkout so the total stays the same but appears as ex-GST + tax line.
+    """
+    GST = 1.15
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    rate_request = body.get("rate", {})
+    destination  = rate_request.get("destination", {})
+    items        = rate_request.get("items", [])
+    currency     = rate_request.get("currency", "NZD")
+
+    result = await live_rates.calculate_freight(items, destination, debug=True)
+
+    rates_out = []
+
+    if _is_canterbury(destination):
+        rates_out.append({
+            "service_name": "PICK UP - Wigram Warehouse",
+            "service_code": "PICKUP",
+            "total_price":  "0",
+            "currency":     currency,
+            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
+        })
+
+    if not result.get("success"):
+        rate_log.log_rate(destination=destination, items=items, result=result,
+                          status="no_carrier_match_b2b", rate=None,
+                          error=result.get("error"))
+        if not rates_out:
+            rates_out.append({
+                "service_name": "Freight — Contact Us",
+                "service_code": "BY_REQUEST",
+                "total_price":  "0",
+                "currency":     currency,
+                "description":  "Custom quote required for this destination"
+            })
+        return {"rates": rates_out}
+
+    incl_price = float(math.ceil(result["customer_price"]))
+    excl_price = round(incl_price / GST, 2)
+    price_cents = int(excl_price * 100)
+    rate_log.log_rate(destination=destination, items=items, result=result,
+                      status="quoted_b2b", rate=excl_price)
+    rates_out.append({
+        "service_name": "Standard Delivery",
+        "service_code": "NED_LIVE_B2B",
+        "total_price":  str(price_cents),
+        "currency":     currency,
+        "description":  "3 to 5 business days",
+    })
+    return {"rates": rates_out}
+
+
 @app.post("/shopify/rates/debug")
 async def shopify_rates_debug(request: Request):
     """
