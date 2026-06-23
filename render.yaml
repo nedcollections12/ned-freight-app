@@ -45,6 +45,8 @@ services:
         value: "1.6"
       - key: FREE_SHIPPING_THRESHOLD
         value: "999999"
+      - key: DUAL_RATES      # set to "1" after Delivery Customization Function is active
+        value: "0"
       - key: SHOPIFY_STORE
         value: nedcollections.myshopify.com
       - key: APP_URL

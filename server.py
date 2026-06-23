@@ -22,6 +22,12 @@ import rate_log     # Persistent log of every rate quote (SQLite on Render disk)
 # Free-shipping threshold — orders ≥ this get free freight
 FREE_SHIPPING_THRESHOLD = float(os.environ.get("FREE_SHIPPING_THRESHOLD", "500"))
 
+# When True, /shopify/rates returns BOTH inclusive (NED_LIVE) and exclusive (NED_LIVE_B2B)
+# rates. Only set this after the Delivery Customization Function is active — otherwise retail
+# customers see two options. Toggle via Render env var DUAL_RATES=1.
+DUAL_RATES = os.environ.get("DUAL_RATES", "0") == "1"
+GST = 1.15
+
 SHOPIFY_API_KEY    = os.environ.get("SHOPIFY_API_KEY", "")
 SHOPIFY_API_SECRET = os.environ.get("SHOPIFY_API_SECRET", "")
 APP_URL            = os.environ.get("APP_URL", "https://ned-freight-app.onrender.com")
@@ -160,6 +166,17 @@ async def shopify_rates(request: Request):
         "currency":     currency,
         "description":  "3 to 5 business days",
     })
+    # B2B exclusive rate — only emitted once DUAL_RATES=1 (i.e. after Delivery Customization
+    # Function is active and hiding this from retail customers)
+    if DUAL_RATES:
+        excl_cents = int(round(display_price / GST, 2) * 100)
+        rates_out.append({
+            "service_name": "Standard Delivery",
+            "service_code": "NED_LIVE_B2B",
+            "total_price":  str(excl_cents),
+            "currency":     currency,
+            "description":  "3 to 5 business days",
+        })
     return {"rates": rates_out}
 
 
