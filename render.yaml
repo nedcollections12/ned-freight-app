@@ -42,7 +42,7 @@ services:
       - key: NED_MARKUP
         value: "1.10"
       - key: PACKING_FACTOR
-        value: "1.6"
+        value: "1.15"
       - key: FREE_SHIPPING_THRESHOLD
         value: "999999"
       - key: DUAL_RATES      # set to "1" after Delivery Customization Function is active

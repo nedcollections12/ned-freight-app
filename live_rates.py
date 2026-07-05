@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 import unicodedata
 from pathlib import Path
 from typing import Optional
@@ -213,14 +214,18 @@ def _cube_dimensions_cm(weight_kg: float) -> tuple:
 # sensibly. Larger carts are split across multiple cartons of equal volume.
 _MAX_CARTON_CBM = 1.0
 
-# Packing factor: real cartons are larger than the raw sum of item CBMs
-# (carton walls, items don't tessellate perfectly, void fill, etc.).
-# Without this, GSS quotes a tiny cube using the raw cart CBM and undercuts
-# the portal price — which is the price NED actually pays. 1.6 was derived
-# empirically from the 24× ACSR case (warehouse ships 2 cartons at 0.0784 m³
-# total vs raw item sum of 0.048 m³ = ratio 1.63). Tunable via PACKING_FACTOR
-# env var if a category turns out to pack more or less efficiently.
-_PACKING_FACTOR = float(os.environ.get("PACKING_FACTOR", "1.6"))
+# Packing factor: real cartons are a little larger than the raw sum of item CBMs
+# (carton walls, items don't tessellate perfectly, void fill, etc.). Genuine
+# packing overhead is ~10-20%, so 1.15 is the default.
+#
+# NOTE: this was previously 1.6 (+60%), reverse-engineered from a SINGLE product
+# (the 24× ACSR case: raw 0.048 m³ vs real cartons 0.0784 m³). That gap wasn't
+# packing air — that SKU's per-unit CBM was understated — so applying 1.6 to the
+# whole catalogue over-inflated products with accurate CBM (e.g. mugs) and pushed
+# them over Castle Parcels' ~0.16 m³ courier ceiling into pricier oversize/LCL.
+# The correct long-term fix is accurate per-product CBM, not a large blanket
+# factor. Tunable via PACKING_FACTOR env var.
+_PACKING_FACTOR = float(os.environ.get("PACKING_FACTOR", "1.15"))
 
 
 def _build_packages(items: list) -> list:
@@ -392,7 +397,17 @@ def quote_mainfreight(cart_cbm: float, destination: dict, override_key: Optional
     """
     rates = _load_carrier_rates()
     city = override_key or _normalise_city(destination.get("city", ""))
-    rate = rates["mainfreight"]["rates"].get(city)
+    mf_rates = rates["mainfreight"]["rates"]
+    rate = mf_rates.get(city)
+    # City aliases resolve to Dailyfreight *zone* keys (e.g. 'cromwell_z5',
+    # 'auckland_z1'), but the Mainfreight rate card is keyed by bare hub names
+    # ('cromwell', 'auckland'). Strip the _zN suffix so the MF formula fallback
+    # still fires for aliased cities (Wanaka, Queenstown, Auckland, Hamilton…).
+    # Without this, quote_mainfreight silently returned None for every aliased
+    # destination, leaving only the pricier Dailyfreight formula as fallback.
+    if not rate:
+        hub = re.sub(r"_z\d+$", "", city)
+        rate = mf_rates.get(hub)
     if not rate:
         return None
     base = rate["base"]
