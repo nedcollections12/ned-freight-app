@@ -210,9 +210,16 @@ def _cube_dimensions_cm(weight_kg: float) -> tuple:
     return (round(side_cm, 1), round(side_cm, 1), round(side_cm, 1))
 
 
-# Cap any single package sent to GSS — beyond ~1m³ couriers won't quote
-# sensibly. Larger carts are split across multiple cartons of equal volume.
-_MAX_CARTON_CBM = 1.0
+# Castle Parcels' courier service tops out around a 0.13 m³ cube (~51 cm side);
+# above that GoSweetSpot only returns oversize/freight options (verified via live
+# GSS probes to Wanaka: courier holds to 0.13, flips to Kiwi Express Oversize at
+# 0.14). We use this ONE number two ways in _build_packages:
+#   1. Courier carton cap — pooled small items are split into cartons no larger
+#      than this, so each parcel qualifies for cheap courier pricing.
+#   2. Small-vs-large divide — any single unit bigger than this physically can't
+#      be a courier parcel (dining chairs, big furniture), so it ships as its own
+#      carton and naturally routes to the Mainfreight/Dailyfreight formulas.
+_COURIER_MAX_CBM = float(os.environ.get("COURIER_MAX_CBM", "0.13"))
 
 # Packing factor: real cartons are a little larger than the raw sum of item CBMs
 # (carton walls, items don't tessellate perfectly, void fill, etc.). Genuine
@@ -230,34 +237,50 @@ _PACKING_FACTOR = float(os.environ.get("PACKING_FACTOR", "1.15"))
 
 def _build_packages(items: list) -> list:
     """
-    Consolidate the entire cart into a small number of equal-sized cartons
-    (capped at _MAX_CARTON_CBM each, after applying the packing factor) and
-    send those to GoSweetSpot — rather than one parcel per cart line × qty.
+    Turn the cart into realistic cartons for GoSweetSpot, separating courier-
+    eligible goods from oversize goods by their PER-UNIT CBM:
 
-    Real-world fulfilment packs multiple units per carton; the previous
-    "one-parcel-per-unit" approach hit GSS's per-parcel minimums (~$8 each):
-    a 24-unit ACSR cart quoted $206 via Post Haste even though the warehouse
-    actually ships it as 2 cartons quoted at $30 on Castle Parcels' portal.
+    • Large items (unit CBM > _COURIER_MAX_CBM) — e.g. dining chairs, big
+      furniture. These can't be a courier parcel, so each unit ships as its own
+      carton at its real size. GSS returns only oversize/freight for them and the
+      Mainfreight/Dailyfreight formulas win — exactly how they're really shipped.
 
-    On top of consolidation we scale the volume by _PACKING_FACTOR so GSS sees
-    realistic *packed* dimensions, not the raw item CBM sum — without this we
-    under-quote and end up cheaper than the portal price NED actually pays.
-    MF/DF formulas are calibrated against raw cart CBM so they're unaffected.
+    • Small items (unit CBM ≤ _COURIER_MAX_CBM) — mugs, tea lights, plates. These
+      are pooled and split into equal cartons no larger than _COURIER_MAX_CBM each
+      so every parcel qualifies for Castle Parcels' cheap courier tier, mirroring
+      the warehouse shipping several master cartons rather than one giant crate.
+
+    Consolidating the small pool (rather than one parcel per unit × qty) avoids
+    GSS's per-parcel minimums (~$8 each). The _PACKING_FACTOR overhead is applied
+    to the small pool only, so GSS sees realistic packed volume without undercutting
+    the portal price. MF/DF formulas use raw cart CBM and are unaffected.
     """
-    raw_kg = sum(
-        (float(item.get("grams", 0) or 0) / 1000.0) * int(item.get("quantity", 1))
-        for item in items
-    )
-    if raw_kg <= 0:
-        return [{"Name": "Carton", "Length": 5, "Width": 5, "Height": 5, "Kg": 0.001, "Type": "Box"}]
+    small_kg = 0.0          # pooled CBM of courier-eligible items
+    large_cartons = []      # one carton per oversize unit, at its real CBM
+    for item in items:
+        unit_cbm = float(item.get("grams", 0) or 0) / 1000.0
+        qty = int(item.get("quantity", 1))
+        if unit_cbm > _COURIER_MAX_CBM:
+            L, W, H = _cube_dimensions_cm(unit_cbm)
+            for _ in range(qty):
+                large_cartons.append({"Name": "Carton", "Length": L, "Width": W,
+                                      "Height": H, "Kg": round(unit_cbm, 3), "Type": "Box"})
+        else:
+            small_kg += unit_cbm * qty
 
-    packed_kg = raw_kg * _PACKING_FACTOR
-    n_cartons = max(1, math.ceil(packed_kg / _MAX_CARTON_CBM))
-    kg_per_carton = packed_kg / n_cartons
-    L, W, H = _cube_dimensions_cm(kg_per_carton)
-    carton = {"Name": "Carton", "Length": L, "Width": W, "Height": H,
-              "Kg": round(kg_per_carton, 3), "Type": "Box"}
-    return [dict(carton) for _ in range(n_cartons)]
+    small_cartons = []
+    if small_kg > 0:
+        packed_kg = small_kg * _PACKING_FACTOR
+        n_cartons = max(1, math.ceil(packed_kg / _COURIER_MAX_CBM))
+        kg_per_carton = packed_kg / n_cartons
+        L, W, H = _cube_dimensions_cm(kg_per_carton)
+        small_cartons = [{"Name": "Carton", "Length": L, "Width": W, "Height": H,
+                          "Kg": round(kg_per_carton, 3), "Type": "Box"} for _ in range(n_cartons)]
+
+    packages = large_cartons + small_cartons
+    if not packages:
+        return [{"Name": "Carton", "Length": 5, "Width": 5, "Height": 5, "Kg": 0.001, "Type": "Box"}]
+    return packages
 
 
 def _total_cbm(items: list) -> float:
@@ -358,10 +381,16 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     # which is clearly wrong for sofa-sized parcels (real KX Oversize minimum
     # for ChCh local is ~$46, Auckland ~$87).
     # If filter removes everything → return None so MF/DF formulas take over.
+    # The per-m³ term does the real work: a genuine underquote on a big item has a
+    # low $/m³ (a $13 sofa quote ≈ $9/m³) and is dropped, while legitimate small
+    # parcels have very high $/m³ (a real $7.85 mug ≈ $1700/m³) and pass. The small
+    # absolute floor is only a backstop against a near-zero glitch quote — it sits
+    # below Post Haste's genuine ~$6-8 courier minimum so it no longer clips real
+    # tiny-parcel quotes (a single mug used to be rejected by 15c at the old $8 floor).
     cart_cbm = sum(float(p.get("Length", 0)) * float(p.get("Width", 0)) * float(p.get("Height", 0))
                    for p in payload["Packages"]) / 1_000_000  # cm³ → m³
-    min_sensible_per_m3 = 40  # absolute floor: $40/m³ raw cost
-    threshold = max(8, cart_cbm * min_sensible_per_m3)
+    min_sensible_per_m3 = 40  # $/m³ raw cost — the primary anomaly test
+    threshold = max(5, cart_cbm * min_sensible_per_m3)
     filtered = [
         o for o in options
         if (o.get("Cost", 0) / GSS_BUILTIN_MARKUP) >= threshold
