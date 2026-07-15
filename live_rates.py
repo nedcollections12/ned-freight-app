@@ -44,8 +44,9 @@ GSS_URL        = "https://api.gosweetspot.com/api/rates"
 # via the same endpoint with different account/serviceLevel codes.
 MAINFREIGHT_API_KEY = os.environ.get("MAINFREIGHT_API_KEY", "")
 MAINFREIGHT_URL     = "https://api.mainfreight.com/transport/1.0/customer/rate?region=NZ"
-MF_ACCOUNT_DF = "NEDCOLDF"   # Ned Collections Dailyfreight (LCL)
-MF_ACCOUNT_MF = "NEDCOLCHC"  # Ned Collections Mainfreight 2 Home (M2H)
+MF_ACCOUNT_DF  = "NEDCOLDF"   # Ned Collections Dailyfreight (LCL)
+MF_ACCOUNT_MF  = "NEDCOLCHC"  # Ned Collections Mainfreight 2 Home (M2H) — ex-Christchurch
+MF_ACCOUNT_AKL = "NEDCOLAKL"  # Ned Collections Mainfreight 2 Home (M2H) — ex-Auckland 3PL
 
 ORIGIN = {
     "Name": "NED Collections Warehouse",
@@ -57,6 +58,15 @@ ORIGIN = {
         "PostCode":      os.environ.get("ORIGIN_POSTCODE", "8042"),
         "CountryCode":   os.environ.get("ORIGIN_COUNTRY", "NZ"),
     }
+}
+
+# Auckland 3PL warehouse — origin for NEDCOLAKL (Mainfreight ex-Auckland) quotes.
+# Fields match the Mainfreight Rating API payload shape (suburb/city/postCode).
+ORIGIN_AKL_ADDRESS = {
+    "suburb":      os.environ.get("AKL_ORIGIN_SUBURB", "Mangere"),
+    "city":        os.environ.get("AKL_ORIGIN_CITY", "Auckland"),
+    "postCode":    os.environ.get("AKL_ORIGIN_POSTCODE", "2022"),
+    "countryCode": os.environ.get("AKL_ORIGIN_COUNTRY", "NZ"),
 }
 
 # Multipliers — tunable via env vars
@@ -503,9 +513,11 @@ def _next_business_day_iso() -> str:
 
 
 async def _mainfreight_rate(account: str, service: str, destination: dict,
-                            packed_cbm: float) -> Optional[float]:
+                            packed_cbm: float, origin_address: Optional[dict] = None) -> Optional[float]:
     """
     Call Mainfreight Rating API for one account/service combo.
+    origin_address: MF-shaped {suburb,city,postCode,countryCode}. Defaults to the
+    Christchurch (Wigram) warehouse; pass ORIGIN_AKL_ADDRESS for ex-Auckland quotes.
     Returns TotalIncludingGSTAmount (carrier-billed price incl FAF + GST), or None.
     """
     if not MAINFREIGHT_API_KEY:
@@ -515,18 +527,21 @@ async def _mainfreight_rate(account: str, service: str, destination: dict,
     if not (city and pc):
         return None  # Mainfreight requires both city and postcode for NZ
 
+    if origin_address is None:
+        origin_address = {
+            "suburb":      ORIGIN["Address"]["Suburb"],
+            "city":        ORIGIN["Address"]["City"],
+            "postCode":    ORIGIN["Address"]["PostCode"],
+            "countryCode": ORIGIN["Address"]["CountryCode"],
+        }
+
     body = {
         "account":      {"code": account},
         "serviceLevel": {"code": service},
         "origin": {
             "freightRequiredDateTime":     _next_business_day_iso(),
             "freightRequiredDateTimeZone": "New Zealand Standard Time",
-            "address": {
-                "suburb":      ORIGIN["Address"]["Suburb"],
-                "city":        ORIGIN["Address"]["City"],
-                "postCode":    ORIGIN["Address"]["PostCode"],
-                "countryCode": ORIGIN["Address"]["CountryCode"],
-            }
+            "address": origin_address,
         },
         "destination": {
             "address": {
@@ -594,6 +609,41 @@ async def quote_mainfreight_live(cart_cbm: float, destination: dict) -> Optional
         "service":  "M2H Two-Man",
         "raw_cost": round(cost, 2),  # already incl FAF + GST per API response
         "_source":  f"Mainfreight Rating API (live) — NEDCOLCHC/M2H @ {cart_cbm:.3f}m³",
+    }
+
+
+async def quote_mainfreight_akl_live(cart_cbm: float, destination: dict) -> Optional[dict]:
+    """Live Mainfreight M2H quote shipped FROM the Auckland 3PL (NEDCOLAKL account)."""
+    cost = await _mainfreight_rate(MF_ACCOUNT_AKL, "M2H", destination, cart_cbm,
+                                   origin_address=ORIGIN_AKL_ADDRESS)
+    if cost is None:
+        return None
+    return {
+        "carrier":  "Mainfreight",
+        "service":  "M2H Two-Man (ex-Auckland)",
+        "raw_cost": round(cost, 2),  # already incl FAF + GST per API response
+        "_source":  f"Mainfreight Rating API (live) — NEDCOLAKL/M2H @ {cart_cbm:.3f}m³",
+    }
+
+
+async def calculate_auckland_freight(items: list, destination: dict) -> dict:
+    """
+    Freight for a cart fulfilled from the Auckland 3PL warehouse (NEDCOLAKL / M2H).
+    Mirrors calculate_freight's return shape so the callback treats it identically.
+    customer_price is GST-inclusive (raw_cost incl GST × NED markup).
+    """
+    cart_cbm = _total_cbm(items)
+    q = await quote_mainfreight_akl_live(cart_cbm, destination)
+    if not q:
+        return {"success": False, "error": "no_akl_rate", "cart_cbm": round(cart_cbm, 4)}
+    return {
+        "success":        True,
+        "cart_cbm":       round(cart_cbm, 4),
+        "chosen_carrier": q["carrier"],
+        "chosen_service": q["service"],
+        "raw_cost":       q["raw_cost"],
+        "ned_markup":     NED_MARKUP,
+        "customer_price": round(q["raw_cost"] * NED_MARKUP, 2),
     }
 
 

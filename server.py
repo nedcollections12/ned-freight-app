@@ -28,6 +28,15 @@ FREE_SHIPPING_THRESHOLD = float(os.environ.get("FREE_SHIPPING_THRESHOLD", "500")
 DUAL_RATES = os.environ.get("DUAL_RATES", "0") == "1"
 GST = 1.15
 
+# ── Auckland 3PL routing (Phase A) ───────────────────────────────────────────
+# Lets NI/retail+B2B customers collect Auckland-3PL stock or have it shipped from
+# Auckland (live NEDCOLAKL rate). Mixed carts (some items only in AKL, some only in
+# CHCH) fall to a manual "Request Freight Quote" until Phase B adds order splitting.
+# Feature-flagged; any error/uncertainty → normal ex-CHCH behaviour (never blocks checkout).
+AKL_ROUTING      = os.environ.get("AKL_ROUTING", "0") == "1"
+AKL_LOCATION_ID  = "gid://shopify/Location/81228890299"  # Auckland Warehouse (3PL)
+CHCH_LOCATION_ID = "gid://shopify/Location/60827664571"  # Click & Collect | Showroom (Main Branch)
+
 SHOPIFY_API_KEY    = os.environ.get("SHOPIFY_API_KEY", "")
 SHOPIFY_API_SECRET = os.environ.get("SHOPIFY_API_SECRET", "")
 APP_URL            = os.environ.get("APP_URL", "https://ned-freight-app.onrender.com")
@@ -124,10 +133,20 @@ async def shopify_rates(request: Request):
             "description":  f"Free freight on orders over ${int(FREE_SHIPPING_THRESHOLD)}"
         }]}
 
+    # Auckland 3PL routing (Phase A) — may replace the standard rate entirely (cart
+    # fulfilled from Auckland) or augment it with an Auckland collect option.
+    akl = await _auckland_routing(destination, items, currency, gst_divisor=1.0)
+    if akl and "replace" in akl:
+        rate_log.log_rate(destination=destination, items=items, result=None,
+                          status="akl_routing", rate=None)
+        return {"rates": akl["replace"]}
+
     # Live carrier quote (debug=True so the rate log captures the full carrier breakdown)
     result = await live_rates.calculate_freight(items, destination, debug=True)
 
     rates_out = []
+    if akl and "append" in akl:
+        rates_out.extend(akl["append"])
 
     # Add a "PICK UP - Wigram Warehouse" option for Canterbury customers only
     if _is_canterbury(destination):
@@ -206,6 +225,148 @@ def _is_canterbury(destination: dict) -> bool:
     return False
 
 
+_NI_PROVINCES = {
+    "AUK", "NTL", "WKO", "BOP", "GIS", "HKB", "TKI", "MWT", "WGN",
+    "AUCKLAND", "NORTHLAND", "WAIKATO", "BAY OF PLENTY", "GISBORNE",
+    "HAWKE'S BAY", "HAWKES BAY", "TARANAKI", "MANAWATU-WANGANUI",
+    "MANAWATU-WHANGANUI", "WELLINGTON",
+}
+
+
+def _is_north_island(destination: dict) -> bool:
+    """North Island destination — eligible to collect from the Auckland 3PL."""
+    province = (destination.get("province") or "").upper().strip()
+    if province in _NI_PROVINCES:
+        return True
+    pc = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    try:
+        # NI postcodes are 0110–6999; South Island is 7000–9999.
+        if 100 <= int(pc[:4]) <= 6999:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
+async def get_location_stock(variant_ids: list) -> dict:
+    """
+    {variant_id(str): {"akl": available, "chch": available}} for the two NZ locations.
+    Fail-safe: returns {} on any error so callers fall back to normal behaviour.
+    """
+    gids = [f"gid://shopify/ProductVariant/{v}" for v in variant_ids if v]
+    if not gids:
+        return {}
+    query = """
+    query($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on ProductVariant {
+          legacyResourceId
+          inventoryItem { inventoryLevels(first: 20) { edges { node {
+            location { id }
+            quantities(names: ["available"]) { quantity }
+          }}}}
+        }
+      }
+    }
+    """
+    try:
+        headers = _shopify_headers()
+        gql_url = f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(gql_url, headers=headers,
+                                  json={"query": query, "variables": {"ids": gids}})
+        nodes = (r.json().get("data") or {}).get("nodes") or []
+    except Exception:
+        return {}
+    out = {}
+    for node in nodes:
+        if not node:
+            continue
+        vid = str(node.get("legacyResourceId") or "")
+        akl = chch = 0
+        levels = (node.get("inventoryItem") or {}).get("inventoryLevels", {}).get("edges", [])
+        for e in levels:
+            loc = e["node"]["location"]["id"]
+            q = e["node"]["quantities"]
+            qty = q[0]["quantity"] if q else 0
+            if loc == AKL_LOCATION_ID:
+                akl = qty
+            elif loc == CHCH_LOCATION_ID:
+                chch = qty
+        if vid:
+            out[vid] = {"akl": akl, "chch": chch}
+    return out
+
+
+def _akl_rate(name: str, code: str, price_cents: int, currency: str, desc: str) -> dict:
+    return {"service_name": name, "service_code": code, "total_price": str(price_cents),
+            "currency": currency, "description": desc}
+
+
+async def _auckland_routing(destination: dict, items: list, currency: str,
+                            gst_divisor: float = 1.0):
+    """
+    Phase A Auckland-3PL routing. Returns one of:
+      None                     — not applicable; caller runs the normal ex-CHCH flow
+      {"append":  [rate, ...]} — add these options alongside the normal rate
+      {"replace": [rate, ...]} — use ONLY these options (normal ex-CHCH rate suppressed)
+    Fail-safe: returns None on any uncertainty or error so checkout is never blocked.
+    """
+    if not AKL_ROUTING:
+        return None
+    try:
+        variant_ids = [str(i.get("variant_id")) for i in items if i.get("variant_id")]
+        if len(variant_ids) != len(items):
+            return None  # can't classify every line → behave as today
+        stock = await get_location_stock(variant_ids)
+        if len(stock) != len(items):
+            return None  # incomplete stock data → behave as today
+
+        all_akl = all_chch = True
+        for i in items:
+            qty = int(i.get("quantity", 1))
+            s = stock.get(str(i.get("variant_id")), {"akl": 0, "chch": 0})
+            if s["akl"] < qty:
+                all_akl = False
+            if s["chch"] < qty:
+                all_chch = False
+
+        is_ni = _is_north_island(destination)
+        collect = _akl_rate(
+            "PICK UP - Auckland Warehouse", "PICKUP_AKL", 0, currency,
+            "Collect from our Auckland warehouse, 86 Ascot Road, Māngere. "
+            "We'll email you when it's ready.")
+        request_quote = _akl_rate(
+            "Request Freight Quote", "BY_REQUEST_AKL", 0, currency,
+            "We'll contact you with a freight quote for this order.")
+
+        if all_chch:
+            # Fulfillable entirely from Christchurch as normal.
+            if all_akl and is_ni:
+                return {"append": [collect]}  # also let NI customers collect from Auckland
+            return None                        # standard ex-CHCH flow, unchanged
+
+        if all_akl:
+            # Every item is in Auckland but NOT all in CHCH → must fulfil from Auckland.
+            akl = await live_rates.calculate_auckland_freight(items, destination)
+            rates = []
+            if akl.get("success"):
+                price = float(math.ceil(akl["customer_price"] / gst_divisor))
+                rates.append(_akl_rate("Standard Delivery", "NED_LIVE_AKL",
+                                       int(price * 100), currency,
+                                       "3 to 5 business days (from Auckland)"))
+            else:
+                rates.append(request_quote)  # no live AKL rate → manual quote
+            if is_ni:
+                rates.append(collect)
+            return {"replace": rates}
+
+        # Mixed cart (some items only in AKL, some only in CHCH) → Phase A interim.
+        return {"replace": [request_quote]}
+    except Exception:
+        return None
+
+
 @app.post("/shopify/rates-b2b")
 async def shopify_rates_b2b(request: Request):
     """
@@ -224,9 +385,15 @@ async def shopify_rates_b2b(request: Request):
     items        = rate_request.get("items", [])
     currency     = rate_request.get("currency", "NZD")
 
+    akl = await _auckland_routing(destination, items, currency, gst_divisor=GST)
+    if akl and "replace" in akl:
+        return {"rates": akl["replace"]}
+
     result = await live_rates.calculate_freight(items, destination, debug=True)
 
     rates_out = []
+    if akl and "append" in akl:
+        rates_out.extend(akl["append"])
 
     if _is_canterbury(destination):
         rates_out.append({
