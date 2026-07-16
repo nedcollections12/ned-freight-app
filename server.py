@@ -36,6 +36,10 @@ GST = 1.15
 AKL_ROUTING      = os.environ.get("AKL_ROUTING", "0") == "1"
 AKL_LOCATION_ID  = "gid://shopify/Location/81228890299"  # Auckland Warehouse (3PL)
 CHCH_LOCATION_ID = "gid://shopify/Location/60827664571"  # Click & Collect | Showroom (Main Branch)
+# Bias toward fulfilling dual-stock items from Auckland (high 3PL holding cost → deplete
+# it first). 0.0 = strict cheapest with ties going to Auckland; 0.10 = choose Auckland
+# even if up to 10% dearer than shipping the dual items ex-CHCH.
+AKL_BIAS         = float(os.environ.get("AKL_BIAS", "0"))
 
 SHOPIFY_API_KEY    = os.environ.get("SHOPIFY_API_KEY", "")
 SHOPIFY_API_SECRET = os.environ.get("SHOPIFY_API_SECRET", "")
@@ -380,15 +384,23 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
             akl_q(must_akl),        chch_q(chch_only + dual),
             akl_q(must_akl + dual), chch_q(chch_only),
         )
-        scenarios = []
+        # A) dual -> CHCH   B) dual -> AKL
+        opt = {}
         if aA.get("success") and cA.get("success"):
-            scenarios.append(("A", must_akl, chch_only + dual, aA["customer_price"], cA["customer_price"]))
+            opt["A"] = (must_akl, chch_only + dual, aA["customer_price"], cA["customer_price"])
         if aB.get("success") and cB.get("success"):
-            scenarios.append(("B", must_akl + dual, chch_only, aB["customer_price"], cB["customer_price"]))
-        if not scenarios:
+            opt["B"] = (must_akl + dual, chch_only, aB["customer_price"], cB["customer_price"])
+        if not opt:
             return None  # no feasible priced split -> defer to normal flow's own fallback
 
-        name, akl_grp, chch_grp, akl_price, chch_price = min(scenarios, key=lambda s: s[3] + s[4])
+        # Prefer Auckland (scenario B) to deplete high-holding-cost AKL stock, when it's
+        # not more than AKL_BIAS dearer than routing the dual items ex-CHCH (ties -> AKL).
+        if "B" in opt and ("A" not in opt or
+                           (opt["B"][2] + opt["B"][3]) <= (opt["A"][2] + opt["A"][3]) * (1 + AKL_BIAS)):
+            name = "B"
+        else:
+            name = "A"
+        akl_grp, chch_grp, akl_price, chch_price = opt[name]
         total = akl_price + chch_price
 
         if akl_grp and chch_grp:
