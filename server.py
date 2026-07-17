@@ -149,7 +149,7 @@ async def shopify_rates(request: Request):
     rates_out = []
 
     # Add a "PICK UP - Wigram Warehouse" option for Canterbury customers only
-    if _is_canterbury(destination):
+    if _is_canterbury(destination) and await _all_at_chch(items):
         rates_out.append({
             "service_name": "PICK UP - Wigram Warehouse",
             "service_code": "PICKUP",
@@ -302,6 +302,32 @@ async def get_location_stock(variant_ids: list) -> dict:
         if vid:
             out[vid] = rec
     return out
+
+
+async def _all_at_chch(items: list) -> bool:
+    """
+    True if every cart item has physical Christchurch stock (on_hand >= qty) — i.e. it can
+    genuinely be collected from / shipped ex the Wigram (CHCH) warehouse. Used to gate the
+    "PICK UP - Wigram Warehouse" option so it's never offered for an item that isn't there
+    (e.g. an Auckland-only line). Fail-safe: returns True on any error/uncertainty so the
+    existing Canterbury pickup behaviour is preserved when we can't read stock.
+    """
+    try:
+        variant_ids = [str(i.get("variant_id")) for i in items if i.get("variant_id")]
+        if not variant_ids:
+            return True
+        stock = await get_location_stock(variant_ids)
+        if not stock:
+            return True  # couldn't read stock -> don't strip the option
+        for i in items:
+            s = stock.get(str(i.get("variant_id")))
+            if s is None:
+                continue  # unknown variant -> don't block on it
+            if s.get("chch_oh", 0) < int(i.get("quantity", 1)):
+                return False
+        return True
+    except Exception:
+        return True
 
 
 def _akl_rate(name: str, code: str, price_cents: int, currency: str, desc: str) -> dict:
@@ -517,7 +543,7 @@ async def shopify_rates_b2b(request: Request):
 
     rates_out = []
 
-    if _is_canterbury(destination):
+    if _is_canterbury(destination) and await _all_at_chch(items):
         rates_out.append({
             "service_name": "PICK UP - Wigram Warehouse",
             "service_code": "PICKUP",
