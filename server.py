@@ -316,26 +316,24 @@ def _std_rate(price_incl: float, gst_divisor: float, currency: str, desc: str) -
             "total_price": str(cents), "currency": currency, "description": desc}
 
 
-async def _auckland_routing(destination: dict, items: list, currency: str,
-                            gst_divisor: float = 1.0):
+async def _route_decision(destination: dict, items: list):
     """
-    Additive Auckland-3PL routing. Returns:
-      None              — no Auckland stock in the cart; caller runs the normal ex-CHCH flow
-      {"rates": [...]}  — the COMPLETE rate set. ALWAYS includes a real, priced Standard
-                          Delivery — it can NEVER emit a bare "Request Quote" nor suppress
-                          the normal freight (that was the NED3139 bug).
+    Core Auckland routing DECISION (no rate formatting) — shared by the rate callbacks
+    and the /route endpoint so checkout pricing and the order split stay consistent.
 
-    Rules:
-      * Engage ONLY when >=1 cart item is in stock at Auckland (AKL available >= qty).
-        CHCH availability NEVER gates anything (CHCH is the default/backorder origin).
-      * Auckland-stocked items ship from whichever origin is CHEAPER for this destination;
-        items with no physical CHCH stock (chch on_hand < qty) must go via Auckland.
-      * NI customers also get a collect-from-Auckland option.
-    Fail-safe: any error/uncertainty -> None so the normal flow (with its own fallback)
-    handles it; a checkout is never left without a real shippable rate.
+    Returns None (no Auckland stock / not feasible) or a dict:
+      must_akl, dual, chch_only     — item classification
+      akl_items, chch_items         — ship grouping for the chosen (cheapest, AKL-biased) scenario
+      akl_price, chch_price         — GST-incl customer_price per ship group
+      collectable                   — items Auckland physically holds (must_akl + dual)
+      chch_only_price               — freight for the non-Auckland items alone (collect-rest price)
+      scenario                      — "A" (dual→CHCH) or "B" (dual→AKL)
+
+    Rules: engage only when >=1 item is in stock at Auckland; CHCH availability never
+    gates (default/backorder origin); items with no physical CHCH stock (on_hand < qty)
+    must go via Auckland; dual-stock items go to the cheaper origin (AKL-biased).
+    Fail-safe: returns None on any error.
     """
-    if not AKL_ROUTING:
-        return None
     try:
         import asyncio
 
@@ -345,9 +343,8 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         stock = await get_location_stock(variant_ids)
         if not stock:
             return None
-        # NB: we tolerate duplicate/unresolvable variants — any item not in `stock`
-        # defaults to CHCH (via _s below), so the feature still engages on the
-        # resolvable Auckland items and unknowns simply ship ex-CHCH (safe).
+        # Tolerate duplicate/unresolvable variants — any item not in `stock` defaults to
+        # CHCH (via _s), so we still engage on resolvable Auckland items (unknowns ship CHCH).
 
         def _qty(i):
             return int(i.get("quantity", 1))
@@ -356,7 +353,6 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
             return stock.get(str(i.get("variant_id")),
                              {"akl": 0, "akl_oh": 0, "chch": 0, "chch_oh": 0})
 
-        # must_akl = only Auckland can fulfil (no physical CHCH stock); dual = both can.
         must_akl, dual, chch_only = [], [], []
         for i in items:
             q, s = _qty(i), _s(i)
@@ -366,9 +362,7 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
                 chch_only.append(i)
 
         if not must_akl and not dual:
-            return None  # nothing in Auckland -> normal ex-CHCH flow (untouched)
-
-        is_ni = _is_north_island(destination)
+            return None  # nothing in Auckland
 
         async def akl_q(grp):
             return await live_rates.calculate_auckland_freight(grp, destination) if grp \
@@ -378,20 +372,19 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
             return await live_rates.calculate_freight(grp, destination) if grp \
                 else {"success": True, "customer_price": 0.0}
 
-        # must_akl always ex-AKL, chch_only always ex-CHCH; DUAL goes wherever is cheaper:
+        # must_akl always ex-AKL, chch_only always ex-CHCH; DUAL goes where cheaper:
         #   A) dual -> CHCH   B) dual -> AKL
         aA, cA, aB, cB = await asyncio.gather(
             akl_q(must_akl),        chch_q(chch_only + dual),
             akl_q(must_akl + dual), chch_q(chch_only),
         )
-        # A) dual -> CHCH   B) dual -> AKL
         opt = {}
         if aA.get("success") and cA.get("success"):
             opt["A"] = (must_akl, chch_only + dual, aA["customer_price"], cA["customer_price"])
         if aB.get("success") and cB.get("success"):
             opt["B"] = (must_akl + dual, chch_only, aB["customer_price"], cB["customer_price"])
         if not opt:
-            return None  # no feasible priced split -> defer to normal flow's own fallback
+            return None
 
         # Prefer Auckland (scenario B) to deplete high-holding-cost AKL stock, when it's
         # not more than AKL_BIAS dearer than routing the dual items ex-CHCH (ties -> AKL).
@@ -401,7 +394,36 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         else:
             name = "A"
         akl_grp, chch_grp, akl_price, chch_price = opt[name]
+        return {
+            "must_akl": must_akl, "dual": dual, "chch_only": chch_only,
+            "akl_items": akl_grp, "chch_items": chch_grp,
+            "akl_price": akl_price, "chch_price": chch_price,
+            "collectable": must_akl + dual,
+            "chch_only_price": cB["customer_price"] if cB.get("success") else None,
+            "scenario": name,
+        }
+    except Exception:
+        return None
+
+
+async def _auckland_routing(destination: dict, items: list, currency: str,
+                            gst_divisor: float = 1.0):
+    """
+    Additive Auckland-3PL routing for the rate callbacks. Returns None (caller runs the
+    normal ex-CHCH flow) or {"rates": [...]} — the COMPLETE rate set, which ALWAYS
+    includes a real priced Standard Delivery and can NEVER emit a bare "Request Quote"
+    nor suppress the normal freight (the NED3139 bug). Fail-safe: None on any error.
+    """
+    if not AKL_ROUTING:
+        return None
+    d = await _route_decision(destination, items)
+    if d is None:
+        return None
+    try:
+        akl_grp, chch_grp = d["akl_items"], d["chch_items"]
+        akl_price, chch_price = d["akl_price"], d["chch_price"]
         total = akl_price + chch_price
+        is_ni = _is_north_island(destination)
 
         if akl_grp and chch_grp:
             note = "Ships in 2 parts — Auckland warehouse + Christchurch. 3 to 5 business days."
@@ -411,27 +433,23 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
             note = "3 to 5 business days."
         rates = [_std_rate(total, gst_divisor, currency, note)]
 
-        # Collect is offered for whatever Auckland physically holds (must_akl + dual),
-        # independent of which origin we ship-priced from.
-        collectable = must_akl + dual
-        if is_ni and collectable:
-            if not chch_only:
+        if is_ni and d["collectable"]:
+            if not d["chch_only"]:
                 rates.append(_akl_rate(
                     "PICK UP - Auckland Warehouse", "PICKUP_AKL", 0, currency,
                     "Collect from our Auckland warehouse, 86 Ascot Road, Māngere. "
                     "We'll email you when it's ready."))
-            elif cB.get("success"):
-                cents = int(float(math.ceil(cB["customer_price"] / gst_divisor)) * 100)
+            elif d["chch_only_price"] is not None:
+                cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
                 rates.append(_akl_rate(
                     "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
                     "Collect Auckland-stocked items from Māngere; the rest ships from Christchurch."))
 
-        # Log per-origin split for review (Rate Log tab) — so abnormal charges are visible.
         try:
             skus = lambda grp: [i.get("sku") or str(i.get("variant_id")) for i in grp]
             rate_log.log_rate(
                 destination=destination, items=items, status="akl_routed", rate=round(total, 2),
-                result={"akl_route": {"scenario": name,
+                result={"akl_route": {"scenario": d["scenario"],
                                       "akl_skus": skus(akl_grp), "akl_charge": round(akl_price, 2),
                                       "chch_skus": skus(chch_grp), "chch_charge": round(chch_price, 2),
                                       "total": round(total, 2)}})
@@ -441,6 +459,36 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         return {"rates": rates}
     except Exception:
         return None
+
+
+@app.post("/route")
+async def route_endpoint(request: Request):
+    """
+    Origin-routing decision for the order splitter (ned-order-split). Given a cart
+    ({items, destination} or a Shopify {rate:{...}} body), returns which variant_ids
+    fulfil from Auckland vs Christchurch (+ the freight split), so an order can be split
+    to the correct Cin7 branch. Read-only; mirrors what checkout priced.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    rate = body.get("rate", body)
+    items = rate.get("items", [])
+    destination = rate.get("destination", {})
+    d = await _route_decision(destination, items)
+    if not d:
+        return {"routed": False}
+    vids = lambda grp: [str(i.get("variant_id")) for i in grp if i.get("variant_id")]
+    return {
+        "routed": True,
+        "scenario": d["scenario"],
+        "akl_variant_ids": vids(d["akl_items"]),
+        "chch_variant_ids": vids(d["chch_items"]),
+        "collectable_variant_ids": vids(d["collectable"]),
+        "akl_charge": round(d["akl_price"], 2),
+        "chch_charge": round(d["chch_price"], 2),
+    }
 
 
 @app.post("/shopify/rates-b2b")
