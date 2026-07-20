@@ -42,7 +42,7 @@ CHCH_LOCATION_ID = "gid://shopify/Location/60827664571"  # Click & Collect | Sho
 AKL_BIAS         = float(os.environ.get("AKL_BIAS", "0"))
 
 # Appended to the freight charge at checkout so customers can flag an odd quote.
-CONTACT_NOTE = "If this shipping charge doesn't look right, email hello@nedcollections.co.nz."
+CONTACT_NOTE = "If this shipping charge doesn't seem right, please contact us."
 
 SHOPIFY_API_KEY    = os.environ.get("SHOPIFY_API_KEY", "")
 SHOPIFY_API_SECRET = os.environ.get("SHOPIFY_API_SECRET", "")
