@@ -41,6 +41,9 @@ CHCH_LOCATION_ID = "gid://shopify/Location/60827664571"  # Click & Collect | Sho
 # even if up to 10% dearer than shipping the dual items ex-CHCH.
 AKL_BIAS         = float(os.environ.get("AKL_BIAS", "0"))
 
+# Appended to the freight charge at checkout so customers can flag an odd quote.
+CONTACT_NOTE = "If this shipping charge doesn't look right, email hello@nedcollections.co.nz."
+
 SHOPIFY_API_KEY    = os.environ.get("SHOPIFY_API_KEY", "")
 SHOPIFY_API_SECRET = os.environ.get("SHOPIFY_API_SECRET", "")
 APP_URL            = os.environ.get("APP_URL", "https://ned-freight-app.onrender.com")
@@ -183,7 +186,7 @@ async def shopify_rates(request: Request):
         "service_code": "NED_LIVE",
         "total_price":  str(price_cents),
         "currency":     currency,
-        "description":  "3 to 5 business days",
+        "description":  "3 to 5 business days. " + CONTACT_NOTE,
     })
     # B2B exclusive rate — only emitted once DUAL_RATES=1 (i.e. after Delivery Customization
     # Function is active and hiding this from retail customers)
@@ -194,7 +197,7 @@ async def shopify_rates(request: Request):
             "service_code": "NED_LIVE_B2B",
             "total_price":  str(excl_cents),
             "currency":     currency,
-            "description":  "3 to 5 business days",
+            "description":  "3 to 5 business days. " + CONTACT_NOTE,
         })
     return {"rates": rates_out}
 
@@ -452,12 +455,12 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         is_ni = _is_north_island(destination)
 
         if akl_grp and chch_grp:
-            note = "Ships in 2 parts — Auckland warehouse + Christchurch. 3 to 5 business days."
+            note = "Your order ships from multiple warehouses (Auckland + Christchurch) — 3 to 5 business days."
         elif akl_grp:
-            note = "Ships from our Auckland warehouse. 3 to 5 business days."
+            note = "Ships from our Auckland warehouse — 3 to 5 business days."
         else:
             note = "3 to 5 business days."
-        rates = [_std_rate(total, gst_divisor, currency, note)]
+        rates = [_std_rate(total, gst_divisor, currency, f"{note} {CONTACT_NOTE}")]
 
         if is_ni and d["collectable"]:
             if not d["chch_only"]:
@@ -576,7 +579,7 @@ async def shopify_rates_b2b(request: Request):
         "service_code": "NED_LIVE_B2B",
         "total_price":  str(price_cents),
         "currency":     currency,
-        "description":  "3 to 5 business days",
+        "description":  "3 to 5 business days. " + CONTACT_NOTE,
     })
     return {"rates": rates_out}
 
