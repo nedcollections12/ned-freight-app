@@ -351,16 +351,16 @@ async def _route_decision(destination: dict, items: list):
     and the /route endpoint so checkout pricing and the order split stay consistent.
 
     Returns None (no Auckland stock / not feasible) or a dict:
-      flex, chch_only               — classification (flex = in Auckland; can ship either origin)
+      must_akl, dual, chch_only     — classification (must_akl=only in AKL, dual=both, chch_only=not in AKL)
       akl_items, chch_items         — ship grouping for the chosen (cheapest, AKL-biased) scenario
       akl_price, chch_price         — GST-incl customer_price per ship group
-      collectable                   — items Auckland holds (= flex)
+      collectable                   — items Auckland holds (must_akl + dual)
       chch_only_price               — freight for the non-Auckland items alone (collect-rest price)
-      scenario                      — "A" (flex→CHCH) or "B" (flex→AKL)
+      scenario                      — "A" (dual→CHCH) or "B" (dual→AKL)
 
-    Rule: cheapest freight always; Auckland only competes when the item is in the Auckland
-    3PL. Items in Auckland (flex) ship from whichever origin is cheaper; items not in
-    Auckland are CHCH-only. Fail-safe: returns None on any error.
+    Rule: only-in-AKL ships ex-Auckland; in-BOTH ships from whichever origin is cheaper;
+    only-in-CHCH ships ex-Christchurch. Auckland only competes when the item is in the
+    Auckland 3PL. Fail-safe: returns None on any error.
     """
     try:
         import asyncio
@@ -381,18 +381,18 @@ async def _route_decision(destination: dict, items: list):
             return stock.get(str(i.get("variant_id")),
                              {"akl": 0, "akl_oh": 0, "chch": 0, "chch_oh": 0})
 
-        # RULE: cheapest freight always; Auckland only competes when the item is actually
-        # in the Auckland 3PL. So an item is "flex" if Auckland can fulfil it (AKL avail >=
-        # qty) — it may then ship ex-Auckland OR ex-Christchurch, whichever is cheaper for
-        # this destination. Items with no Auckland stock are CHCH-only.
-        flex, chch_only = [], []
+        # RULE (Kaleb): only-in-AKL -> ex-Auckland; in BOTH -> cheapest for customer;
+        # only-in-CHCH -> ex-Christchurch. must_akl = Auckland has it but CHCH doesn't
+        # (on_hand < qty); dual = both physically hold it; chch_only = not in Auckland.
+        must_akl, dual, chch_only = [], [], []
         for i in items:
-            if _s(i)["akl"] >= _qty(i):
-                flex.append(i)
+            q, s = _qty(i), _s(i)
+            if s["akl"] >= q:
+                (dual if s["chch_oh"] >= q else must_akl).append(i)
             else:
                 chch_only.append(i)
 
-        if not flex:
+        if not must_akl and not dual:
             return None  # nothing in Auckland
 
         async def akl_q(grp):
@@ -403,23 +403,21 @@ async def _route_decision(destination: dict, items: list):
             return await live_rates.calculate_freight(grp, destination) if grp \
                 else {"success": True, "customer_price": 0.0}
 
-        # Two ways to fulfil the flex items — pick the cheaper total:
-        #   A) flex ex-CHCH (everything from Christchurch)
-        #   B) flex ex-Auckland (Christchurch keeps only the non-Auckland items)
-        flex_akl, chch_only_q, all_chch = await asyncio.gather(
-            akl_q(flex),               # flex ex-Auckland            (scenario B akl group)
-            chch_q(chch_only),         # non-Auckland items ex-CHCH  (B chch group + collect-rest)
-            chch_q(chch_only + flex),  # everything ex-Christchurch  (scenario A)
+        # must_akl always ex-AKL, chch_only always ex-CHCH; DUAL goes wherever is cheaper:
+        #   A) dual -> CHCH   B) dual -> AKL
+        aA, cA, aB, cB = await asyncio.gather(
+            akl_q(must_akl),        chch_q(chch_only + dual),
+            akl_q(must_akl + dual), chch_q(chch_only),
         )
         opt = {}
-        if all_chch.get("success"):
-            opt["A"] = ([], chch_only + flex, 0.0, all_chch["customer_price"])
-        if flex_akl.get("success") and chch_only_q.get("success"):
-            opt["B"] = (flex, chch_only, flex_akl["customer_price"], chch_only_q["customer_price"])
+        if aA.get("success") and cA.get("success"):
+            opt["A"] = (must_akl, chch_only + dual, aA["customer_price"], cA["customer_price"])
+        if aB.get("success") and cB.get("success"):
+            opt["B"] = (must_akl + dual, chch_only, aB["customer_price"], cB["customer_price"])
         if not opt:
             return None
 
-        # Prefer Auckland (B) within AKL_BIAS to deplete high-holding-cost 3PL stock (ties -> AKL).
+        # Prefer Auckland (scenario B) within AKL_BIAS to deplete 3PL stock (ties -> AKL).
         if "B" in opt and ("A" not in opt or
                            (opt["B"][2] + opt["B"][3]) <= (opt["A"][2] + opt["A"][3]) * (1 + AKL_BIAS)):
             name = "B"
@@ -427,11 +425,11 @@ async def _route_decision(destination: dict, items: list):
             name = "A"
         akl_grp, chch_grp, akl_price, chch_price = opt[name]
         return {
-            "flex": flex, "chch_only": chch_only,
+            "must_akl": must_akl, "dual": dual, "chch_only": chch_only,
             "akl_items": akl_grp, "chch_items": chch_grp,
             "akl_price": akl_price, "chch_price": chch_price,
-            "collectable": flex,
-            "chch_only_price": chch_only_q["customer_price"] if chch_only_q.get("success") else None,
+            "collectable": must_akl + dual,
+            "chch_only_price": cB["customer_price"] if cB.get("success") else None,
             "scenario": name,
         }
     except Exception:
