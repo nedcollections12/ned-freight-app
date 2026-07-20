@@ -626,16 +626,43 @@ async def quote_mainfreight_akl_live(cart_cbm: float, destination: dict) -> Opti
     }
 
 
+async def quote_dailyfreight_akl_live(cart_cbm: float, destination: dict) -> Optional[dict]:
+    """Live Dailyfreight LCL quote shipped FROM the Auckland 3PL (NEDCOLDF account, Māngere origin).
+
+    NOTE: reuses the ex-CHCH NEDCOLDF account with an Auckland origin — the Rating API
+    prices it correctly, but confirm with Mainfreight that NEDCOLDF can *collect & bill*
+    ex-Māngere (M2H got its own NEDCOLAKL account rather than reusing NEDCOLCHC).
+    """
+    cost = await _mainfreight_rate(MF_ACCOUNT_DF, "LCL", destination, cart_cbm,
+                                   origin_address=ORIGIN_AKL_ADDRESS)
+    if cost is None:
+        return None
+    return {
+        "carrier":  "Dailyfreight",
+        "service":  "LCL Palletised (ex-Auckland)",
+        "raw_cost": round(cost, 2),  # already incl FAF + GST per API response
+        "_source":  f"Mainfreight Rating API (live) — NEDCOLDF/LCL ex-AKL @ {cart_cbm:.3f}m³",
+    }
+
+
 async def calculate_auckland_freight(items: list, destination: dict) -> dict:
     """
-    Freight for a cart fulfilled from the Auckland 3PL warehouse (NEDCOLAKL / M2H).
-    Mirrors calculate_freight's return shape so the callback treats it identically.
-    customer_price is GST-inclusive (raw_cost incl GST × NED markup).
+    Freight for a cart fulfilled from the Auckland 3PL warehouse — cheapest of the two
+    ex-AKL carriers: Mainfreight M2H (NEDCOLAKL) and Dailyfreight LCL (NEDCOLDF, Māngere
+    origin). Mirrors calculate_freight's return shape so the callback treats it identically.
+    Live-only: the carrier_rates.json formulas are calibrated ex-CHCH, so there is no
+    formula fallback for an Auckland origin. customer_price is GST-inclusive.
     """
     cart_cbm = _total_cbm(items)
-    q = await quote_mainfreight_akl_live(cart_cbm, destination)
-    if not q:
+    import asyncio as _asyncio
+    m2h, df = await _asyncio.gather(
+        quote_mainfreight_akl_live(cart_cbm, destination),
+        quote_dailyfreight_akl_live(cart_cbm, destination),
+    )
+    quotes = [q for q in (m2h, df) if q]
+    if not quotes:
         return {"success": False, "error": "no_akl_rate", "cart_cbm": round(cart_cbm, 4)}
+    q = min(quotes, key=lambda x: x["raw_cost"])
     return {
         "success":        True,
         "cart_cbm":       round(cart_cbm, 4),
