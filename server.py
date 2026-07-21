@@ -430,6 +430,7 @@ async def _route_decision(destination: dict, items: list):
             "akl_price": akl_price, "chch_price": chch_price,
             "collectable": must_akl + dual,
             "chch_only_price": cB["customer_price"] if cB.get("success") else None,
+            "must_akl_price": aA["customer_price"] if aA.get("success") else None,
             "scenario": name,
         }
     except Exception:
@@ -474,6 +475,16 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
                 rates.append(_akl_rate(
                     "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
                     "Collect Auckland-stocked items from Māngere; the rest ships from Christchurch."))
+
+        # Canterbury customer with an Auckland-only item in a mixed cart: let them collect
+        # the Christchurch-held items from Wigram and ship only the Auckland-only items.
+        elif _is_canterbury(destination) and d["must_akl"] and (d["chch_only"] or d["dual"]) \
+                and d.get("must_akl_price") is not None:
+            cents = int(float(math.ceil(d["must_akl_price"] / gst_divisor)) * 100)
+            rates.append(_akl_rate(
+                "Collect Christchurch items + ship Auckland", "WIGRAM_MIXED_COLLECT", cents, currency,
+                "Collect the Christchurch-stocked items from our Wigram warehouse; "
+                "the Auckland items ship from Auckland."))
 
         try:
             skus = lambda grp: [i.get("sku") or str(i.get("variant_id")) for i in grp]
