@@ -645,20 +645,49 @@ async def quote_dailyfreight_akl_live(cart_cbm: float, destination: dict) -> Opt
     }
 
 
+def quote_dailyfreight_akl(cart_cbm: float, destination: dict, override_key: Optional[str] = None) -> Optional[dict]:
+    """
+    Dailyfreight LCL quote shipped FROM the Auckland 3PL, using NED's NEGOTIATED ex-AKL
+    rate card (data/carrier_rates.json -> 'dailyfreight_akl'). Reuses the same city-alias
+    zone keys as the ex-CHCH table. Formula: MAX(base, per_m3_tier × cbm) × FAF × GST.
+
+    This replaces the live-API DF ex-AKL quote, which returned generic (non-negotiated)
+    rates because the Rating API doesn't hold NED's ex-Auckland Dailyfreight card.
+    """
+    rates = _load_carrier_rates()
+    rate_key = override_key or _normalise_city(destination.get("city", ""))
+    rate = rates.get("dailyfreight_akl", {}).get("rates", {}).get(rate_key)
+    if not rate:
+        fb = _fallback_keys(destination)  # resolve by postcode/region if city didn't map
+        if fb:
+            rate_key = fb[1]
+            rate = rates.get("dailyfreight_akl", {}).get("rates", {}).get(rate_key)
+    if not rate:
+        return None
+    tier_idx = _df_tier_index(cart_cbm)
+    per_m3 = rate["tiers"][tier_idx]
+    base = rate["base"]
+    raw_cost = max(base, per_m3 * cart_cbm) * FAF_MULTIPLIER * GST_MULTIPLIER
+    return {
+        "carrier":  "Dailyfreight",
+        "service":  "LCL Palletised (ex-Auckland)",
+        "raw_cost": round(raw_cost, 2),
+        "_source":  f"ex-AKL card {rate_key} tier {['<5m³','5-10m³','≥10m³'][tier_idx]}: "
+                    f"MAX({base}, {per_m3} × {cart_cbm:.3f}) × FAF × GST",
+    }
+
+
 async def calculate_auckland_freight(items: list, destination: dict) -> dict:
     """
     Freight for a cart fulfilled from the Auckland 3PL warehouse — cheapest of the two
     ex-AKL carriers: Mainfreight M2H (NEDCOLAKL) and Dailyfreight LCL (NEDCOLDF, Māngere
     origin). Mirrors calculate_freight's return shape so the callback treats it identically.
-    Live-only: the carrier_rates.json formulas are calibrated ex-CHCH, so there is no
-    formula fallback for an Auckland origin. customer_price is GST-inclusive.
+    Mainfreight is live via the Rating API; Dailyfreight uses NED's negotiated ex-AKL rate
+    card (formula) — the live API doesn't hold that card. customer_price is GST-inclusive.
     """
     cart_cbm = _total_cbm(items)
-    import asyncio as _asyncio
-    m2h, df = await _asyncio.gather(
-        quote_mainfreight_akl_live(cart_cbm, destination),
-        quote_dailyfreight_akl_live(cart_cbm, destination),
-    )
+    m2h = await quote_mainfreight_akl_live(cart_cbm, destination)  # live Mainfreight M2H ex-AKL
+    df = quote_dailyfreight_akl(cart_cbm, destination)             # formula from negotiated ex-AKL card
     quotes = [q for q in (m2h, df) if q]
     if not quotes:
         return {"success": False, "error": "no_akl_rate", "cart_cbm": round(cart_cbm, 4)}

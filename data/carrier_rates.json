@@ -6,117 +6,551 @@
   },
   "castle_parcels": {
     "_meta": {
-      "label":   "Castle Parcels (Post Haste)",
-      "rep":     "Antonya Hector — Antonya.hector@posthaste.co.nz — 027 209 3528",
+      "label": "Castle Parcels (Post Haste)",
+      "rep": "Antonya Hector — Antonya.hector@posthaste.co.nz — 027 209 3528",
       "vintage": "Valid until July 2026",
-      "note":    "Live quotes via GoSweetSpot API in production. Table here is reference only. Per-parcel pricing — no volume discount."
+      "note": "Live quotes via GoSweetSpot API in production. Table here is reference only. Per-parcel pricing — no volume discount."
     },
     "brackets": [
-      {"cube_m3": 0.015, "max_kg": 25},
-      {"cube_m3": 0.030, "max_kg": 25},
-      {"cube_m3": 0.050, "max_kg": 25},
-      {"cube_m3": 0.075, "max_kg": 25},
-      {"cube_m3": 0.100, "max_kg": 25},
-      {"cube_m3": 0.125, "max_kg": 25},
-      {"cube_m3": 0.135, "max_kg": 25},
-      {"cube_m3": 0.160, "max_kg": 25}
+      {
+        "cube_m3": 0.015,
+        "max_kg": 25
+      },
+      {
+        "cube_m3": 0.03,
+        "max_kg": 25
+      },
+      {
+        "cube_m3": 0.05,
+        "max_kg": 25
+      },
+      {
+        "cube_m3": 0.075,
+        "max_kg": 25
+      },
+      {
+        "cube_m3": 0.1,
+        "max_kg": 25
+      },
+      {
+        "cube_m3": 0.125,
+        "max_kg": 25
+      },
+      {
+        "cube_m3": 0.135,
+        "max_kg": 25
+      },
+      {
+        "cube_m3": 0.16,
+        "max_kg": 25
+      }
     ],
     "zones": [
-      {"id": "chch_local",   "name": "Local (ChCh Metro)",                  "rates": [3.97, 3.97, 3.97, 3.97, 3.97, 3.97, 3.97, 3.97]},
-      {"id": "chch_outer",   "name": "Outer (Outside Metro)",               "rates": [4.80, 4.80, 4.80, 4.80, 4.80, 4.80, 4.80, 4.80]},
-      {"id": "regional_si",  "name": "Regional (Timaru — note: Post Haste does not service Kaikoura)", "rates": [4.80, 5.55, 6.56, 7.81, 9.06, 10.31, 10.82, 22.51]},
-      {"id": "within_si",    "name": "Within Island (Nelson, Dunedin)",     "rates": [5.94, 7.84, 10.37, 13.52, 16.68, 19.85, 21.11, 34.70]},
-      {"id": "ni_upper",     "name": "NI 2-Day Upper (Auckland, Hamilton)", "rates": [6.43, 8.81, 11.99, 15.95, 19.92, 23.89, 25.47, 39.89]},
-      {"id": "ni_lower",     "name": "NI 2-Day Lower (Wellington)",         "rates": [5.74, 8.67, 10.44, 14.62, 19.63, 24.53, 27.14, 39.89]}
+      {
+        "id": "chch_local",
+        "name": "Local (ChCh Metro)",
+        "rates": [
+          3.97,
+          3.97,
+          3.97,
+          3.97,
+          3.97,
+          3.97,
+          3.97,
+          3.97
+        ]
+      },
+      {
+        "id": "chch_outer",
+        "name": "Outer (Outside Metro)",
+        "rates": [
+          4.8,
+          4.8,
+          4.8,
+          4.8,
+          4.8,
+          4.8,
+          4.8,
+          4.8
+        ]
+      },
+      {
+        "id": "regional_si",
+        "name": "Regional (Timaru — note: Post Haste does not service Kaikoura)",
+        "rates": [
+          4.8,
+          5.55,
+          6.56,
+          7.81,
+          9.06,
+          10.31,
+          10.82,
+          22.51
+        ]
+      },
+      {
+        "id": "within_si",
+        "name": "Within Island (Nelson, Dunedin)",
+        "rates": [
+          5.94,
+          7.84,
+          10.37,
+          13.52,
+          16.68,
+          19.85,
+          21.11,
+          34.7
+        ]
+      },
+      {
+        "id": "ni_upper",
+        "name": "NI 2-Day Upper (Auckland, Hamilton)",
+        "rates": [
+          6.43,
+          8.81,
+          11.99,
+          15.95,
+          19.92,
+          23.89,
+          25.47,
+          39.89
+        ]
+      },
+      {
+        "id": "ni_lower",
+        "name": "NI 2-Day Lower (Wellington)",
+        "rates": [
+          5.74,
+          8.67,
+          10.44,
+          14.62,
+          19.63,
+          24.53,
+          27.14,
+          39.89
+        ]
+      }
     ],
     "surcharges": {
-      "rural_delivery":       7.09,
+      "rural_delivery": 7.09,
       "residential_delivery": 2.53
     },
     "satchels": [
-      {"label": "CPS / Small", "price": 4.78},
-      {"label": "CP / Medium", "price": 5.99},
-      {"label": "Large",       "price": 9.69},
-      {"label": "CPM / XL",    "price": 10.84}
+      {
+        "label": "CPS / Small",
+        "price": 4.78
+      },
+      {
+        "label": "CP / Medium",
+        "price": 5.99
+      },
+      {
+        "label": "Large",
+        "price": 9.69
+      },
+      {
+        "label": "CPM / XL",
+        "price": 10.84
+      }
     ]
   },
   "mainfreight": {
     "_meta": {
-      "label":   "Mainfreight",
+      "label": "Mainfreight",
       "service": "M2H Two-Man Delivery",
       "vintage": "Current rate card",
       "formula": "MAX(min_charge, base + per_m³ × cart_CBM) × FAF (1.30) × GST (1.15)",
-      "note":    "Flat per-destination rate (no zone subdivision). Use for heavy items / two-man delivery."
+      "note": "Flat per-destination rate (no zone subdivision). Use for heavy items / two-man delivery."
     },
     "rates": {
-      "auckland":         {"base": 33, "min": 50, "per_m3": 71.74},
-      "blenheim":         {"base": 30, "min": 37, "per_m3": 53.56},
-      "christchurch":     {"base": 30, "min": 27, "per_m3": 16.48},
-      "cromwell":         {"base": 33, "min": 40, "per_m3": 59.96},
-      "dunedin":          {"base": 30, "min": 37, "per_m3": 51.50},
-      "gisborne":         {"base": 33, "min": 50, "per_m3": 137.05},
-      "greymouth":        {"base": 30, "min": 37, "per_m3": 70.04},
-      "hamilton":         {"base": 33, "min": 50, "per_m3": 91.01},
-      "invercargill":     {"base": 30, "min": 37, "per_m3": 52.53},
-      "kaitaia":          {"base": 33, "min": 50, "per_m3": 141.33},
-      "levin":            {"base": 33, "min": 50, "per_m3": 70.67},
-      "napier":           {"base": 33, "min": 50, "per_m3": 134.91},
-      "nelson":           {"base": 30, "min": 37, "per_m3": 53.56},
-      "new plymouth":     {"base": 33, "min": 50, "per_m3": 130.62},
-      "oamaru":           {"base": 30, "min": 47, "per_m3": 61.80},
-      "palmerston north": {"base": 33, "min": 50, "per_m3": 70.67},
-      "rotorua":          {"base": 33, "min": 50, "per_m3": 113.49},
-      "taupo":            {"base": 33, "min": 50, "per_m3": 117.78},
-      "tauranga":         {"base": 33, "min": 50, "per_m3": 91.01},
-      "thames":           {"base": 33, "min": 50, "per_m3": 106.00},
-      "timaru":           {"base": 30, "min": 47, "per_m3": 43.26},
-      "wanganui":         {"base": 33, "min": 50, "per_m3": 137.05},
-      "wellington":       {"base": 33, "min": 50, "per_m3": 65.31},
-      "whangarei":        {"base": 33, "min": 50, "per_m3": 132.76}
+      "auckland": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 71.74
+      },
+      "blenheim": {
+        "base": 30,
+        "min": 37,
+        "per_m3": 53.56
+      },
+      "christchurch": {
+        "base": 30,
+        "min": 27,
+        "per_m3": 16.48
+      },
+      "cromwell": {
+        "base": 33,
+        "min": 40,
+        "per_m3": 59.96
+      },
+      "dunedin": {
+        "base": 30,
+        "min": 37,
+        "per_m3": 51.5
+      },
+      "gisborne": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 137.05
+      },
+      "greymouth": {
+        "base": 30,
+        "min": 37,
+        "per_m3": 70.04
+      },
+      "hamilton": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 91.01
+      },
+      "invercargill": {
+        "base": 30,
+        "min": 37,
+        "per_m3": 52.53
+      },
+      "kaitaia": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 141.33
+      },
+      "levin": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 70.67
+      },
+      "napier": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 134.91
+      },
+      "nelson": {
+        "base": 30,
+        "min": 37,
+        "per_m3": 53.56
+      },
+      "new plymouth": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 130.62
+      },
+      "oamaru": {
+        "base": 30,
+        "min": 47,
+        "per_m3": 61.8
+      },
+      "palmerston north": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 70.67
+      },
+      "rotorua": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 113.49
+      },
+      "taupo": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 117.78
+      },
+      "tauranga": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 91.01
+      },
+      "thames": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 106.0
+      },
+      "timaru": {
+        "base": 30,
+        "min": 47,
+        "per_m3": 43.26
+      },
+      "wanganui": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 137.05
+      },
+      "wellington": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 65.31
+      },
+      "whangarei": {
+        "base": 33,
+        "min": 50,
+        "per_m3": 132.76
+      }
     }
   },
   "dailyfreight": {
     "_meta": {
-      "label":   "Dailyfreight",
+      "label": "Dailyfreight",
       "service": "LCL (Less than Container Load) Palletised",
       "vintage": "April 2026 rates",
       "formula": "MAX(base, per_m3_tier × cart_CBM) × FAF (1.30) × GST (1.15)",
-      "tiers":   "Per-m³ rate drops with cart size: tier 0 = <5m³, tier 1 = 5-9.99m³, tier 2 = ≥10m³",
-      "note":    "Hub-and-spoke zones: zone 1-2 = metro hub city only; higher zones = outlying towns. Use a city alias to route to the right zone."
+      "tiers": "Per-m³ rate drops with cart size: tier 0 = <5m³, tier 1 = 5-9.99m³, tier 2 = ≥10m³",
+      "note": "Hub-and-spoke zones: zone 1-2 = metro hub city only; higher zones = outlying towns. Use a city alias to route to the right zone."
     },
     "rates": {
-      "ashburton":          {"base": 39, "tiers": [32, 30, 28]},
-      "auckland_z1":        {"base": 51, "tiers": [75.88, 73.61, 72.12]},
-      "auckland_z3":        {"base": 53, "tiers": [84.20, 80.30, 78.21]},
-      "auckland_z9":        {"base": 57, "tiers": [107.24, 105.24, 103.24]},
-      "blenheim":           {"base": 39, "tiers": [62, 60, 58]},
-      "christchurch":       {"base": 29, "tiers": [25, 25, 25]},
-      "cromwell_z1":        {"base": 42, "tiers": [67.57, 65.57, 65.57]},
-      "cromwell_z5":        {"base": 47, "tiers": [90.44, 88.44, 86.44]},
-      "dunedin":            {"base": 39, "tiers": [61, 59, 57]},
-      "gore":               {"base": 48, "tiers": [70, 68, 66]},
-      "greymouth":          {"base": 39, "tiers": [54, 52, 50]},
-      "hamilton_z1":        {"base": 51, "tiers": [88.36, 86.36, 84.36]},
-      "hamilton_z3":        {"base": 53, "tiers": [101.24, 99.24, 97.24]},
-      "hamilton_z10":       {"base": 57, "tiers": [129.89, 127.89, 125.89]},
-      "invercargill":       {"base": 39, "tiers": [67, 65, 63]},
-      "kaitaia":            {"base": 57, "tiers": [218.30, 214.30, 210.30]},
-      "levin":              {"base": 51, "tiers": [72.77, 70.77, 68.77]},
-      "masterton":          {"base": 51, "tiers": [116.42, 114.42, 112.42]},
-      "napier":             {"base": 51, "tiers": [132.02, 130.02, 128.02]},
-      "nelson":             {"base": 39, "tiers": [54, 52, 50]},
-      "new plymouth":       {"base": 51, "tiers": [127.86, 125.86, 123.86]},
-      "oamaru":             {"base": 39, "tiers": [60, 58, 56]},
-      "palmerston north":   {"base": 51, "tiers": [71.73, 69.73, 67.73]},
-      "rotorua":            {"base": 51, "tiers": [110.19, 108.19, 106.19]},
-      "taupo":              {"base": 51, "tiers": [114.35, 112.35, 110.35]},
-      "tauranga":           {"base": 51, "tiers": [88.36, 86.36, 84.36]},
-      "thames":             {"base": 51, "tiers": [103.95, 101.95, 99.95]},
-      "timaru":              {"base": 39, "tiers": [40, 38, 36]},
-      "wanganui":           {"base": 51, "tiers": [135.14, 133.14, 131.14]},
-      "wellington":         {"base": 48, "tiers": [65.49, 63.49, 61.49]},
-      "whakatane":          {"base": 51, "tiers": [124.74, 122.74, 120.74]},
-      "whangarei":          {"base": 51, "tiers": [145.53, 143.53, 141.53]}
+      "ashburton": {
+        "base": 39,
+        "tiers": [
+          32,
+          30,
+          28
+        ]
+      },
+      "auckland_z1": {
+        "base": 51,
+        "tiers": [
+          75.88,
+          73.61,
+          72.12
+        ]
+      },
+      "auckland_z3": {
+        "base": 53,
+        "tiers": [
+          84.2,
+          80.3,
+          78.21
+        ]
+      },
+      "auckland_z9": {
+        "base": 57,
+        "tiers": [
+          107.24,
+          105.24,
+          103.24
+        ]
+      },
+      "blenheim": {
+        "base": 39,
+        "tiers": [
+          62,
+          60,
+          58
+        ]
+      },
+      "christchurch": {
+        "base": 29,
+        "tiers": [
+          25,
+          25,
+          25
+        ]
+      },
+      "cromwell_z1": {
+        "base": 42,
+        "tiers": [
+          67.57,
+          65.57,
+          65.57
+        ]
+      },
+      "cromwell_z5": {
+        "base": 47,
+        "tiers": [
+          90.44,
+          88.44,
+          86.44
+        ]
+      },
+      "dunedin": {
+        "base": 39,
+        "tiers": [
+          61,
+          59,
+          57
+        ]
+      },
+      "gore": {
+        "base": 48,
+        "tiers": [
+          70,
+          68,
+          66
+        ]
+      },
+      "greymouth": {
+        "base": 39,
+        "tiers": [
+          54,
+          52,
+          50
+        ]
+      },
+      "hamilton_z1": {
+        "base": 51,
+        "tiers": [
+          88.36,
+          86.36,
+          84.36
+        ]
+      },
+      "hamilton_z3": {
+        "base": 53,
+        "tiers": [
+          101.24,
+          99.24,
+          97.24
+        ]
+      },
+      "hamilton_z10": {
+        "base": 57,
+        "tiers": [
+          129.89,
+          127.89,
+          125.89
+        ]
+      },
+      "invercargill": {
+        "base": 39,
+        "tiers": [
+          67,
+          65,
+          63
+        ]
+      },
+      "kaitaia": {
+        "base": 57,
+        "tiers": [
+          218.3,
+          214.3,
+          210.3
+        ]
+      },
+      "levin": {
+        "base": 51,
+        "tiers": [
+          72.77,
+          70.77,
+          68.77
+        ]
+      },
+      "masterton": {
+        "base": 51,
+        "tiers": [
+          116.42,
+          114.42,
+          112.42
+        ]
+      },
+      "napier": {
+        "base": 51,
+        "tiers": [
+          132.02,
+          130.02,
+          128.02
+        ]
+      },
+      "nelson": {
+        "base": 39,
+        "tiers": [
+          54,
+          52,
+          50
+        ]
+      },
+      "new plymouth": {
+        "base": 51,
+        "tiers": [
+          127.86,
+          125.86,
+          123.86
+        ]
+      },
+      "oamaru": {
+        "base": 39,
+        "tiers": [
+          60,
+          58,
+          56
+        ]
+      },
+      "palmerston north": {
+        "base": 51,
+        "tiers": [
+          71.73,
+          69.73,
+          67.73
+        ]
+      },
+      "rotorua": {
+        "base": 51,
+        "tiers": [
+          110.19,
+          108.19,
+          106.19
+        ]
+      },
+      "taupo": {
+        "base": 51,
+        "tiers": [
+          114.35,
+          112.35,
+          110.35
+        ]
+      },
+      "tauranga": {
+        "base": 51,
+        "tiers": [
+          88.36,
+          86.36,
+          84.36
+        ]
+      },
+      "thames": {
+        "base": 51,
+        "tiers": [
+          103.95,
+          101.95,
+          99.95
+        ]
+      },
+      "timaru": {
+        "base": 39,
+        "tiers": [
+          40,
+          38,
+          36
+        ]
+      },
+      "wanganui": {
+        "base": 51,
+        "tiers": [
+          135.14,
+          133.14,
+          131.14
+        ]
+      },
+      "wellington": {
+        "base": 48,
+        "tiers": [
+          65.49,
+          63.49,
+          61.49
+        ]
+      },
+      "whakatane": {
+        "base": 51,
+        "tiers": [
+          124.74,
+          122.74,
+          120.74
+        ]
+      },
+      "whangarei": {
+        "base": 51,
+        "tiers": [
+          145.53,
+          143.53,
+          141.53
+        ]
+      }
     }
   },
   "city_aliases": {
@@ -283,5 +717,280 @@
     "balclutha": "dunedin",
     "milton": "dunedin",
     "mosgiel": "dunedin"
+  },
+  "dailyfreight_akl": {
+    "_meta": {
+      "label": "Dailyfreight LCL ex-Auckland (NEDCOLDF)",
+      "service": "Less than Container Load",
+      "origin": "Auckland (Areas 1-3)",
+      "vintage": "2026-07-14",
+      "note": "All rates exclude FAF+GST; tiers [<5m3, 5+, 5+]"
+    },
+    "rates": {
+      "ashburton": {
+        "base": 48,
+        "tiers": [
+          152.17,
+          149.89,
+          149.89
+        ]
+      },
+      "auckland_z1": {
+        "base": 25,
+        "tiers": [
+          29.11,
+          27.03,
+          27.03
+        ]
+      },
+      "auckland_z3": {
+        "base": 29,
+        "tiers": [
+          37.37,
+          35.14,
+          35.14
+        ]
+      },
+      "auckland_z9": {
+        "base": 29,
+        "tiers": [
+          58.73,
+          56.33,
+          56.33
+        ]
+      },
+      "blenheim": {
+        "base": 46,
+        "tiers": [
+          109.04,
+          106.94,
+          106.94
+        ]
+      },
+      "christchurch": {
+        "base": 44,
+        "tiers": [
+          124.83,
+          122.87,
+          122.87
+        ]
+      },
+      "cromwell_z1": {
+        "base": 48,
+        "tiers": [
+          202.99,
+          202.11,
+          202.11
+        ]
+      },
+      "cromwell_z5": {
+        "base": 50,
+        "tiers": [
+          211.13,
+          209.77,
+          209.77
+        ]
+      },
+      "dunedin": {
+        "base": 46,
+        "tiers": [
+          185.78,
+          183.22,
+          183.22
+        ]
+      },
+      "gore": {
+        "base": 50,
+        "tiers": [
+          217.75,
+          215.34,
+          215.34
+        ]
+      },
+      "greymouth": {
+        "base": 48,
+        "tiers": [
+          177.34,
+          175.1,
+          175.1
+        ]
+      },
+      "hamilton_z1": {
+        "base": 29,
+        "tiers": [
+          51.21,
+          49.01,
+          49.01
+        ]
+      },
+      "hamilton_z3": {
+        "base": 30,
+        "tiers": [
+          59.14,
+          56.88,
+          56.88
+        ]
+      },
+      "hamilton_z10": {
+        "base": 34,
+        "tiers": [
+          83.68,
+          81.25,
+          81.25
+        ]
+      },
+      "invercargill": {
+        "base": 49,
+        "tiers": [
+          234.76,
+          232.71,
+          232.71
+        ]
+      },
+      "kaikoura": {
+        "base": 48,
+        "tiers": [
+          145.31,
+          143.05,
+          143.05
+        ]
+      },
+      "kaitaia": {
+        "base": 34,
+        "tiers": [
+          103.89,
+          101.54,
+          101.54
+        ]
+      },
+      "levin": {
+        "base": 34,
+        "tiers": [
+          85.27,
+          82.99,
+          82.99
+        ]
+      },
+      "masterton": {
+        "base": 34,
+        "tiers": [
+          96.98,
+          94.74,
+          94.74
+        ]
+      },
+      "napier": {
+        "base": 34,
+        "tiers": [
+          82.98,
+          80.41,
+          80.41
+        ]
+      },
+      "nelson": {
+        "base": 48,
+        "tiers": [
+          240.6,
+          238.18,
+          238.18
+        ]
+      },
+      "new plymouth": {
+        "base": 34,
+        "tiers": [
+          77.03,
+          74.66,
+          74.66
+        ]
+      },
+      "oamaru": {
+        "base": 48,
+        "tiers": [
+          228.63,
+          226.02,
+          226.02
+        ]
+      },
+      "palmerston north": {
+        "base": 34,
+        "tiers": [
+          68.7,
+          66.13,
+          66.13
+        ]
+      },
+      "rotorua": {
+        "base": 34,
+        "tiers": [
+          53.73,
+          51.44,
+          51.44
+        ]
+      },
+      "taupo": {
+        "base": 34,
+        "tiers": [
+          66.35,
+          64.23,
+          64.23
+        ]
+      },
+      "tauranga": {
+        "base": 34,
+        "tiers": [
+          54.21,
+          52.0,
+          52.0
+        ]
+      },
+      "thames": {
+        "base": 34,
+        "tiers": [
+          48.8,
+          46.36,
+          46.36
+        ]
+      },
+      "timaru": {
+        "base": 48,
+        "tiers": [
+          156.93,
+          154.28,
+          154.28
+        ]
+      },
+      "wanganui": {
+        "base": 32,
+        "tiers": [
+          90.31,
+          87.77,
+          87.77
+        ]
+      },
+      "wellington": {
+        "base": 32,
+        "tiers": [
+          94.56,
+          92.03,
+          92.03
+        ]
+      },
+      "whakatane": {
+        "base": 34,
+        "tiers": [
+          68.27,
+          65.88,
+          65.88
+        ]
+      },
+      "whangarei": {
+        "base": 34,
+        "tiers": [
+          59.66,
+          57.12,
+          57.12
+        ]
+      }
+    }
   }
 }
