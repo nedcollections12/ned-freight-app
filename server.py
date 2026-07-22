@@ -532,6 +532,40 @@ async def route_endpoint(request: Request):
     }
 
 
+@app.post("/leg-quote")
+async def leg_quote_endpoint(request: Request):
+    """
+    Per-leg freight quote for the split-order freight reconcile (ned-order-split).
+    Given an explicit item list + destination + origin ("akl" or "chch"), returns
+    the freight cost for shipping JUST those items from JUST that warehouse.
+
+    Unlike /route this does NOT decide the split — the caller passes exactly what
+    Cin7 actually put on each branch SO, so the leg cost always matches the real
+    fulfilment (no reliance on Shopify location stock, which can lag Cin7). Used to
+    divide the freight the customer paid across the split consignments in proportion
+    to each leg's true cost. customer_price is GST-inclusive; only the ratio is used
+    (GST/markup cancel), and the caller anchors to the actual paid total. Read-only.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    items       = body.get("items", [])
+    destination = body.get("destination", {})
+    origin      = str(body.get("origin", "chch")).lower()
+    if origin in ("akl", "auckland", "3323"):
+        r = await live_rates.calculate_auckland_freight(items, destination)
+    else:
+        r = await live_rates.calculate_freight(items, destination)
+    return {
+        "success":        bool(r.get("success")),
+        "origin":         origin,
+        "customer_price": r.get("customer_price"),
+        "carrier":        r.get("chosen_carrier"),
+        "cart_cbm":       r.get("cart_cbm"),
+    }
+
+
 @app.post("/shopify/rates-b2b")
 async def shopify_rates_b2b(request: Request):
     """
