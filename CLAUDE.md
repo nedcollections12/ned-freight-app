@@ -56,6 +56,7 @@ Set in Render dashboard (Settings → Environment). All required unless marked o
 
 | Var | Purpose |
 |---|---|
+| `ADMIN_API_TOKEN` | Shared secret guarding all write endpoints (CBM edits, rate reload, sync). Fail-closed: unset → writes return 503. Admin UI passes it via the iframe URL `?k=…`, so set the Shopify app URL to `…/?k=<token>`. |
 | `GSS_ACCESS_KEY` | GoSweetSpot API auth (Castle Parcels live quotes) |
 | `GSS_SITE_ID` | GoSweetSpot site ID |
 | `SHOPIFY_STORE` | `nedcollections.myshopify.com` |

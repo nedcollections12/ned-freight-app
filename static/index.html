@@ -358,6 +358,12 @@ Customer sees one clean shipping option</div>
 </main>
 
 <script>
+// Admin token — passed through from the iframe URL (?k=…) so writes to Shopify
+// CBMs / rate cards are authenticated. Read once; kept for this session only.
+const ADMIN_TOKEN = new URLSearchParams(location.search).get('k') || '';
+function adminHeaders(extra) {
+  return Object.assign({ 'X-Admin-Token': ADMIN_TOKEN }, extra || {});
+}
 let allVariants = [];
 const STATE = { sort: 'product', sortDir: 1 };
 
@@ -787,7 +793,7 @@ async function saveCbm(input) {
   try {
     const r = await fetch('/api/cbm', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: adminHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ inv_id: inv, cbm })
     });
     const data = await r.json();

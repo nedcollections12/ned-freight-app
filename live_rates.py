@@ -25,6 +25,21 @@ import httpx
 
 logger = logging.getLogger("ned_freight")
 
+# Shared async HTTP client — reused across every quote so we don't pay a fresh
+# TLS + Cloudflare handshake to GoSweetSpot/Mainfreight on each checkout. A cold
+# connection from our Singapore region costs ~1-2s; on slow provincial/inter-island
+# lanes that pushed GSS past its 9s budget and silently dropped Castle Parcels
+# (the ~31% CP drop-out we saw concentrated on South-Island routes). Keep-alive
+# holds the connection warm between checkouts; per-request timeouts stay at the
+# call sites below.
+_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, keepalive_expiry=90.0)
+_client = httpx.AsyncClient(limits=_HTTP_LIMITS)
+
+
+async def aclose_http() -> None:
+    """Close the shared HTTP client — called on app shutdown."""
+    await _client.aclose()
+
 
 def _strip_diacritics(s: str) -> str:
     """Remove macrons and other accents — e.g. 'Wānaka' → 'wanaka'."""
@@ -367,8 +382,7 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     # overcharge bug). Every drop below is logged so the failure is visible.
     _dest_label = f"{dest_payload['Address']['Suburb']} {dest_payload['Address']['PostCode']}".strip()
     try:
-        async with httpx.AsyncClient(timeout=9.0) as client:
-            r = await client.post(GSS_URL, json=payload, headers=headers)
+        r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=9.0)
         if r.status_code != 200:
             logger.warning("GSS dropped CP for %s: HTTP %s — falling back to MF/DF formula",
                            _dest_label, r.status_code)
@@ -566,8 +580,7 @@ async def _mainfreight_rate(account: str, service: str, destination: dict,
         "Accept":        "application/json",
     }
     try:
-        async with httpx.AsyncClient(timeout=7.0) as client:
-            r = await client.post(MAINFREIGHT_URL, headers=H, json=body)
+        r = await _client.post(MAINFREIGHT_URL, headers=H, json=body, timeout=7.0)
         if r.status_code != 200:
             return None
         for c in r.json().get("charges", []):

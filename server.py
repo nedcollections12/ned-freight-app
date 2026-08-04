@@ -1,6 +1,6 @@
 """NED Freight App — FastAPI Server"""
 
-import json, math, os, hmac, hashlib
+import json, math, os, hmac, hashlib, logging
 from pathlib import Path
 from typing import Optional
 # Load .env before importing anything that reads env vars
@@ -11,7 +11,7 @@ except ImportError:
     pass  # dotenv only needed for local dev; Render injects env vars natively
 import uvicorn
 import httpx
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,8 +19,12 @@ from zones import detect_zone, get_oversized_zone
 import live_rates  # Live carrier-rate calculation (CP/MF/DF)
 import rate_log     # Persistent log of every rate quote (SQLite on Render disk)
 
+logger = logging.getLogger("ned_freight")
+
 # Free-shipping threshold — orders ≥ this get free freight
-FREE_SHIPPING_THRESHOLD = float(os.environ.get("FREE_SHIPPING_THRESHOLD", "500"))
+# Default 999999 = effectively off; only free-ship when the env var is set intentionally.
+# (Was 500 — a footgun that would free-ship every ≥$500 order if the env var ever dropped.)
+FREE_SHIPPING_THRESHOLD = float(os.environ.get("FREE_SHIPPING_THRESHOLD", "999999"))
 
 # When True, /shopify/rates returns BOTH inclusive (NED_LIVE) and exclusive (NED_LIVE_B2B)
 # rates. Only set this after the Delivery Customization Function is active — otherwise retail
@@ -55,6 +59,34 @@ PRODUCTS_FILE = BASE_DIR / "data" / "oversized_products.json"
 
 app = FastAPI(title="NED Freight App", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+# ── Admin auth ───────────────────────────────────────────────────────────────
+# Shared secret guarding every endpoint that mutates live data (Shopify CBMs,
+# rate cards, delivery profiles). The embedded admin UI passes the token through
+# from its iframe URL (?k=…); direct callers can use the X-Admin-Token header.
+# Fail-closed: if ADMIN_API_TOKEN isn't set we refuse rather than run wide open.
+ADMIN_API_TOKEN = os.environ.get("ADMIN_API_TOKEN", "")
+
+
+def require_admin(request: Request):
+    """Gate mutating/admin endpoints behind ADMIN_API_TOKEN."""
+    if not ADMIN_API_TOKEN:
+        raise HTTPException(status_code=503, detail="Admin auth not configured (set ADMIN_API_TOKEN)")
+    supplied = (
+        request.headers.get("X-Admin-Token")
+        or request.query_params.get("k")
+        or request.query_params.get("token")
+        or ""
+    )
+    if not hmac.compare_digest(supplied, ADMIN_API_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    """Close the shared HTTP client cleanly on shutdown."""
+    await live_rates.aclose_http()
 
 
 @app.middleware("http")
@@ -122,6 +154,27 @@ async def shopify_rates(request: Request):
     items        = rate_request.get("items", [])
     currency     = rate_request.get("currency", "NZD")
 
+    # Last-resort guard: the carrier calls already degrade gracefully, but an
+    # unexpected error in the orchestration (bad price data, malformed quote,
+    # disk hiccup) must still return a usable option — never a 500 / no rate.
+    try:
+        return await _compute_rates(destination, items, currency)
+    except Exception as e:
+        logger.exception("shopify_rates failed for %s", destination.get("city", ""))
+        rate_log.log_rate(destination=destination, items=items, result=None,
+                          status="error", rate=None, error=f"{type(e).__name__}: {e}")
+        return {"rates": [{
+            "service_name": "Freight — Contact Us",
+            "service_code": "BY_REQUEST",
+            "total_price":  "0",
+            "currency":     currency,
+            "description":  "Custom quote required — please contact us to confirm freight.",
+        }]}
+
+
+async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
+    """Core /shopify/rates quote logic — wrapped by shopify_rates() so any
+    unexpected failure still returns a checkout option instead of a 500."""
     # Cart subtotal (Shopify sends item.price in cents)
     order_value = sum(
         (int(i.get("price", 0)) / 100.0) * int(i.get("quantity", 1))
@@ -664,7 +717,7 @@ async def api_rate_log(limit: int = 200):
     return {"entries": rate_log.recent(limit)}
 
 
-@app.post("/api/reload-rates")
+@app.post("/api/reload-rates", dependencies=[Depends(require_admin)])
 async def reload_rates():
     """Force reload of carrier_rates.json without restarting the app."""
     live_rates.reload_carrier_rates()
@@ -738,7 +791,7 @@ async def cbm_list():
     return {"variants": all_v, "count": len(all_v)}
 
 
-@app.put("/api/cbm")
+@app.put("/api/cbm", dependencies=[Depends(require_admin)])
 async def cbm_update(request: Request):
     """Update one variant's weight (CBM in kg). Body: {inv_id, cbm}."""
     body = await request.json()
@@ -773,11 +826,11 @@ async def cbm_update(request: Request):
 @app.get("/api/rates")
 async def get_rates(): return load_rates()
 
-@app.put("/api/rates")
+@app.put("/api/rates", dependencies=[Depends(require_admin)])
 async def update_rates(request: Request):
     save_rates(await request.json()); return {"status":"saved"}
 
-@app.put("/api/settings")
+@app.put("/api/settings", dependencies=[Depends(require_admin)])
 async def update_settings(request: Request):
     body = await request.json(); rates = load_rates()
     rates["settings"].update(body); save_rates(rates); return {"status":"saved"}
@@ -785,18 +838,18 @@ async def update_settings(request: Request):
 @app.get("/api/products")
 async def get_products(): return load_products()
 
-@app.put("/api/products/{product_id}")
+@app.put("/api/products/{product_id}", dependencies=[Depends(require_admin)])
 async def upsert_product(product_id: str, request: Request):
     products = load_products(); products[product_id] = await request.json()
     save_products(products); return {"status":"saved"}
 
-@app.delete("/api/products/{product_id}")
+@app.delete("/api/products/{product_id}", dependencies=[Depends(require_admin)])
 async def delete_product(product_id: str):
     products = load_products()
     if product_id not in products: raise HTTPException(404, "Not found")
     del products[product_id]; save_products(products); return {"status":"deleted"}
 
-@app.post("/api/upload/{rate_type}")
+@app.post("/api/upload/{rate_type}", dependencies=[Depends(require_admin)])
 async def upload_rates(rate_type: str, file: UploadFile = File(...)):
     content = await file.read(); fname = file.filename or ""
     if fname.endswith(".csv"):
@@ -887,7 +940,7 @@ async def shopify_callback(code: str, shop: str, request: Request):
         f"<p>Callback URL: <code>{APP_URL}/shopify/rates</code></p>"
     )
 
-@app.post("/api/sync-shopify-zones")
+@app.post("/api/sync-shopify-zones", dependencies=[Depends(require_admin)])
 async def sync_shopify_zones():
     """Push 9 oversized freight zones + correct flat rates to Shopify (spreadsheet pricing)."""
     if not TOKEN_FILE.exists():
@@ -1259,7 +1312,7 @@ async def check_zones():
     return out
 
 
-@app.post("/api/sync-product-profiles")
+@app.post("/api/sync-product-profiles", dependencies=[Depends(require_admin)])
 async def sync_product_profiles():
     """Assign Shopify products to their oversized delivery profiles based on CBM spreadsheet data."""
     if not TOKEN_FILE.exists():
