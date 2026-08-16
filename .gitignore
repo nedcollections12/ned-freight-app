@@ -20,3 +20,10 @@ data/shopify_token.json
 # Local virtualenv
 .venv/
 venv/
+
+# Generated CBM reconciliation artifacts (working data, not code)
+cbm_comparison.csv
+cbm_comparison.xlsx
+cin7_backfill_plan.csv
+cin7_cbm_import.csv
+shopify_active_cbm_issues.csv

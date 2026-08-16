@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from zones import detect_zone, get_oversized_zone
 import live_rates  # Live carrier-rate calculation (CP/MF/DF)
 import rate_log     # Persistent log of every rate quote (SQLite on Render disk)
+import cin7_cbm_sync  # Forward CBM sync: Cin7 optionWeight -> Shopify weight (POST /cin7/sync-cbm)
 
 logger = logging.getLogger("ned_freight")
 
@@ -87,6 +88,36 @@ def require_admin(request: Request):
 async def _shutdown():
     """Close the shared HTTP client cleanly on shutdown."""
     await live_rates.aclose_http()
+
+
+# ── Background CBM sync scheduler ────────────────────────────────────────────
+# Every CBM_SYNC_INTERVAL_MIN minutes, push plausible Cin7 CBMs into Shopify so new
+# products get a checkout freight rate. Inert until CBM_SYNC_ENABLED=1 so it can ship
+# dark and be switched on once Cin7 data is cleaned. Manual trigger: POST /cin7/sync-cbm.
+CBM_SYNC_ENABLED = os.environ.get("CBM_SYNC_ENABLED", "0") == "1"
+CBM_SYNC_INTERVAL_MIN = float(os.environ.get("CBM_SYNC_INTERVAL_MIN", "15"))
+
+
+@app.on_event("startup")
+async def _start_cbm_sync():
+    if not CBM_SYNC_ENABLED:
+        logger.info("CBM sync scheduler disabled (set CBM_SYNC_ENABLED=1 to enable)")
+        return
+    import asyncio
+
+    async def _loop():
+        await asyncio.sleep(60)  # let the app warm up before the first run
+        while True:
+            try:
+                s = await cin7_cbm_sync.run_sync(dry_run=False, send_alert=True)
+                logger.info("CBM sync: updated=%d bad=%d errors=%d",
+                            len(s["updated"]), len(s["bad_cin7"]), len(s["errors"]))
+            except Exception as e:
+                logger.error("CBM sync loop error: %s", e)
+            await asyncio.sleep(CBM_SYNC_INTERVAL_MIN * 60)
+
+    asyncio.create_task(_loop())
+    logger.info("CBM sync scheduler started (every %s min)", CBM_SYNC_INTERVAL_MIN)
 
 
 @app.middleware("http")
@@ -822,6 +853,31 @@ async def cbm_update(request: Request):
         raise HTTPException(400, str(errors))
     actual = data["data"]["inventoryItemUpdate"]["inventoryItem"]["measurement"]["weight"]["value"]
     return {"status": "ok", "cbm": actual}
+
+
+@app.post("/cin7/sync-cbm", dependencies=[Depends(require_admin)])
+async def cin7_sync_cbm(request: Request, dry_run: bool = False):
+    """
+    Push plausible Cin7 CBMs (option optionWeight) into Shopify variant weights so new
+    products get a working checkout freight rate. Called by the Render cron every 15 min.
+
+    Guardrails live in cin7_cbm_sync.run_sync: only writes 0 < cbm <= CBM_SYNC_MAX,
+    never overwrites a good value with 0, and emails CBM_SYNC_ALERT_TO on bad Cin7 data
+    or Shopify write errors.  Pass ?dry_run=true to preview without writing.
+    """
+    summary = await cin7_cbm_sync.run_sync(dry_run=dry_run, send_alert=not dry_run)
+    return {
+        "status": "ok",
+        "dry_run": dry_run,
+        "updated": len(summary["updated"]),
+        "bad_cin7": len(summary["bad_cin7"]),
+        "errors": len(summary["errors"]),
+        "unchanged": summary["unchanged"],
+        "no_shopify_match": summary["no_shopify_match"],
+        "updated_skus": [r["sku"] for r in summary["updated"]],
+        "bad_cin7_skus": [r["sku"] for r in summary["bad_cin7"]],
+    }
+
 
 @app.get("/api/rates")
 async def get_rates(): return load_rates()
