@@ -872,7 +872,7 @@ async def cin7_sync_cbm(request: Request, dry_run: bool = False):
         "updated": len(summary["updated"]),
         "bad_cin7": len(summary["bad_cin7"]),
         "errors": len(summary["errors"]),
-        "unchanged": summary["unchanged"],
+        "kept_existing": summary.get("kept_existing", 0),
         "no_shopify_match": summary["no_shopify_match"],
         "updated_skus": [r["sku"] for r in summary["updated"]],
         "bad_cin7_skus": [r["sku"] for r in summary["bad_cin7"]],

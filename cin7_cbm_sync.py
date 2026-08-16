@@ -1,14 +1,18 @@
 """
-Forward CBM sync: Cin7 option `optionWeight` -> Shopify variant weight (= CBM the
-freight app reads at checkout).
+Forward CBM sync: Cin7 product `volume` -> Shopify variant weight (= CBM the freight
+app reads at checkout).
 
-Fixes "new variant defaults to 0 CBM -> no freight rate at checkout": whenever a
-plausible CBM (0 < cbm <= MAX) exists in Cin7 and differs from Shopify, push it to
-Shopify. Matched by SKU (Cin7 option `code` == Shopify variant `sku`).
+Fixes "new variant defaults to 0 CBM -> no freight rate at checkout": when a plausible
+CBM exists in Cin7 and the Shopify variant has NO CBM yet, fill it. Matched by SKU
+(Cin7 option `code` == Shopify variant `sku`).
 
-Guardrails (the Cin7 data has junk 31.0 defaults and decimal errors):
+CBM source is the product-level `volume` field, NOT option `optionWeight` — the latter
+holds kg for some products and caused freight overcharges (lamps synced at ~0.8 m3).
+
+Guardrails (both Cin7 fields carry junk defaults — 0.4 volume / 31 weight):
+  * FILL-ONLY: only writes when Shopify CBM is 0/missing; NEVER overwrites an existing
+    value (so a junk 0.4/31 can't clobber a good Shopify CBM).
   * Only writes when 0 < cin7_cbm <= CBM_SYNC_MAX (default 4.0 m3).
-  * NEVER overwrites a good Shopify value with a Cin7 zero/blank.
   * Out-of-range Cin7 values are skipped and emailed to CBM_SYNC_ALERT_TO to fix at source.
   * Any Shopify write error is collected and emailed too.
 
@@ -51,22 +55,26 @@ def _shopify_headers():
 
 
 async def fetch_cin7_cbms(client) -> dict:
-    """{sku_lower: {'sku','product','cbm'}} from Cin7 option optionWeight."""
+    """
+    {sku_lower: {'sku','product','cbm'}} — CBM read from the product-level `volume`
+    field (Cin7 convention: volume = CBM m3, weight = kg). NOT `optionWeight`, which is
+    an unreliable legacy field (holds kg for some products) and caused freight overcharges.
+    """
     out, page = {}, 1
     while True:
         r = await client.get("https://api.cin7.com/api/v1/Products",
-                             params={"page": page, "rows": 250, "fields": "id,name,productOptions"},
+                             params={"page": page, "rows": 250, "fields": "id,name,volume,productOptions"},
                              headers=_cin7_auth(), timeout=40)
         r.raise_for_status()
         batch = r.json()
         if not batch:
             break
         for p in batch:
+            cbm = float(p.get("volume") or 0)          # product-level CBM applies to all its options
             for o in (p.get("productOptions") or []):
                 sku = (o.get("code") or "").strip()
                 if sku:
-                    out[sku.lower()] = {"sku": sku, "product": p.get("name", ""),
-                                        "cbm": float(o.get("optionWeight") or 0)}
+                    out[sku.lower()] = {"sku": sku, "product": p.get("name", ""), "cbm": cbm}
         if len(batch) < 250:
             break
         page += 1
@@ -155,7 +163,7 @@ async def run_sync(dry_run: bool = True, send_alert: bool = True) -> dict:
     there are out-of-range Cin7 values or Shopify write errors (unless send_alert=False).
     """
     summary = {"dry_run": dry_run, "updated": [], "bad_cin7": [], "errors": [],
-               "unchanged": 0, "no_shopify_match": 0}
+               "unchanged": 0, "no_shopify_match": 0, "kept_existing": 0}
     async with httpx.AsyncClient() as client:
         cin7 = await fetch_cin7_cbms(client)
         shop = await fetch_shopify_cbms(client)
@@ -172,8 +180,11 @@ async def run_sync(dry_run: bool = True, send_alert: bool = True) -> dict:
                 summary["bad_cin7"].append({"sku": c["sku"], "product": c["product"],
                                             "cin7_cbm": cbm, "shopify_cbm": s["cbm"]})
                 continue
-            if abs(cbm - s["cbm"]) <= EPS:
-                summary["unchanged"] += 1
+            # FILL-ONLY: only populate a missing/zero Shopify CBM (the new-product case).
+            # Never overwrite an existing value — both Cin7 fields carry junk defaults
+            # (0.4 volume / 31 weight) that would clobber good data.
+            if s["cbm"] > EPS:
+                summary["kept_existing"] += 1
                 continue
             row = {"sku": c["sku"], "product": s["product"], "cin7_cbm": cbm, "shopify_cbm": s["cbm"]}
             if dry_run:
@@ -221,7 +232,7 @@ if __name__ == "__main__":
     print(f"  updated:         {len(res['updated'])}")
     print(f"  bad_cin7 (>4m3): {len(res['bad_cin7'])}")
     print(f"  errors:          {len(res['errors'])}")
-    print(f"  unchanged:       {res['unchanged']}")
+    print(f"  kept_existing:   {res['kept_existing']}   (fill-only: never overwrites a value)")
     print(f"  no_shopify_match:{res['no_shopify_match']}")
     for r in res["updated"][:20]:
         print(f"    {r['sku'][:16]:17}{r['product'][:24]:25} {r['shopify_cbm']} -> {r['cin7_cbm']}")
