@@ -54,6 +54,26 @@ def _shopify_headers():
     return {"X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN, "Content-Type": "application/json"}
 
 
+async def _request_with_retry(client, method, url, *, max_attempts=5, **kwargs):
+    """HTTP with backoff on 429 / 5xx — Cin7 and Shopify both rate-limit (429)."""
+    last = None
+    for attempt in range(max_attempts):
+        r = await client.request(method, url, **kwargs)
+        if r.status_code == 429 or r.status_code >= 500:
+            last = r
+            ra = (r.headers.get("Retry-After") or "").strip()
+            wait = float(ra) if ra.replace(".", "", 1).isdigit() else min(2 ** attempt, 30)
+            log.warning("%s %s -> %s; retry %d/%d in %.1fs", method, url.rsplit("/", 1)[-1],
+                        r.status_code, attempt + 1, max_attempts, wait)
+            await asyncio.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r
+    if last is not None:
+        last.raise_for_status()
+    raise RuntimeError("request failed without a response")
+
+
 async def fetch_cin7_cbms(client) -> dict:
     """
     {sku_lower: {'sku','product','cbm'}} — CBM read from the product-level `volume`
@@ -62,10 +82,9 @@ async def fetch_cin7_cbms(client) -> dict:
     """
     out, page = {}, 1
     while True:
-        r = await client.get("https://api.cin7.com/api/v1/Products",
-                             params={"page": page, "rows": 250, "fields": "id,name,volume,productOptions"},
-                             headers=_cin7_auth(), timeout=40)
-        r.raise_for_status()
+        r = await _request_with_retry(client, "GET", "https://api.cin7.com/api/v1/Products",
+                                      params={"page": page, "rows": 250, "fields": "id,name,volume,productOptions"},
+                                      headers=_cin7_auth(), timeout=40)
         batch = r.json()
         if not batch:
             break
@@ -78,6 +97,7 @@ async def fetch_cin7_cbms(client) -> dict:
         if len(batch) < 250:
             break
         page += 1
+        await asyncio.sleep(0.6)                        # stay under Cin7's rate limit
     return out
 
 
@@ -93,9 +113,8 @@ async def fetch_shopify_cbms(client) -> dict:
     }"""
     out, cursor = {}, None
     while True:
-        r = await client.post(GQL_URL, headers=_shopify_headers(),
-                              json={"query": query, "variables": {"cursor": cursor}}, timeout=40)
-        r.raise_for_status()
+        r = await _request_with_retry(client, "POST", GQL_URL, headers=_shopify_headers(),
+                                      json={"query": query, "variables": {"cursor": cursor}}, timeout=40)
         d = r.json()["data"]["productVariants"]
         for e in d["edges"]:
             v = e["node"]
@@ -121,9 +140,8 @@ async def _update_shopify_cbm(client, inv_id: str, cbm: float):
       }
     }"""
     variables = {"id": inv_id, "input": {"measurement": {"weight": {"value": cbm, "unit": "KILOGRAMS"}}}}
-    r = await client.post(GQL_URL, headers=_shopify_headers(),
-                          json={"query": mutation, "variables": variables}, timeout=20)
-    r.raise_for_status()
+    r = await _request_with_retry(client, "POST", GQL_URL, headers=_shopify_headers(),
+                                  json={"query": mutation, "variables": variables}, timeout=20)
     errs = (r.json().get("data") or {}).get("inventoryItemUpdate", {}).get("userErrors", [])
     if errs:
         raise RuntimeError(str(errs))
@@ -138,6 +156,10 @@ def _alert_body(summary: dict) -> str:
         f"Errors writing to Shopify: {len(summary['errors'])}",
         "",
     ]
+    if summary.get("fatal_error"):
+        lines.append(f"RUN FAILED before completing: {summary['fatal_error']}")
+        lines.append("(No Shopify changes were made this run. It will retry next cycle.)")
+        lines.append("")
     if summary["bad_cin7"]:
         lines.append("Bad Cin7 CBM values (not synced — please correct in Cin7):")
         for r in summary["bad_cin7"]:
@@ -163,8 +185,9 @@ async def run_sync(dry_run: bool = True, send_alert: bool = True) -> dict:
     there are out-of-range Cin7 values or Shopify write errors (unless send_alert=False).
     """
     summary = {"dry_run": dry_run, "updated": [], "bad_cin7": [], "errors": [],
-               "unchanged": 0, "no_shopify_match": 0, "kept_existing": 0}
-    async with httpx.AsyncClient() as client:
+               "unchanged": 0, "no_shopify_match": 0, "kept_existing": 0, "fatal_error": None}
+    try:
+      async with httpx.AsyncClient() as client:
         cin7 = await fetch_cin7_cbms(client)
         shop = await fetch_shopify_cbms(client)
 
@@ -197,10 +220,17 @@ async def run_sync(dry_run: bool = True, send_alert: bool = True) -> dict:
                 summary["errors"].append({**row, "error": str(e)})
                 log.error("CBM write failed for %s: %s", c["sku"], e)
 
-    # Alert on anything that needs a human: bad Cin7 data or write errors.
-    if send_alert and (summary["bad_cin7"] or summary["errors"]):
-        subject = f"[NED Freight] CBM sync: {len(summary['errors'])} error(s), " \
-                  f"{len(summary['bad_cin7'])} bad Cin7 value(s)"
+    except Exception as e:
+        # Fetch/connection failure (e.g. Cin7 429 after retries) — don't crash the
+        # scheduler or 500 the endpoint; record it and make sure it's not silent.
+        summary["fatal_error"] = str(e)
+        log.error("CBM sync run failed: %s", e)
+
+    # Alert on anything that needs a human: a fatal failure, bad Cin7 data, or write errors.
+    if send_alert and (summary["fatal_error"] or summary["bad_cin7"] or summary["errors"]):
+        subject = f"[NED Freight] CBM sync: " + (
+            "RUN FAILED" if summary["fatal_error"]
+            else f"{len(summary['errors'])} error(s), {len(summary['bad_cin7'])} bad Cin7 value(s)")
         await emailer.send_email(ALERT_TO, subject, _alert_body(summary))
 
     return summary
