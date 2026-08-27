@@ -335,6 +335,38 @@ def _is_north_island(destination: dict) -> bool:
     return False
 
 
+# North Island NORTH OF WELLINGTON — the only region where a dual-stocked item is
+# fulfilled from the Auckland 3PL. Wellington region + South Island get dual items
+# ex-Christchurch (shipping a dual line down from Auckland to Wgtn/SI makes no sense).
+# NB: only affects DUAL items — an Auckland-only line still ships ex-AKL everywhere.
+_UPPER_NI_PROVINCES = {
+    "AUK", "NTL", "WKO", "BOP", "GIS", "HKB", "TKI", "MWT",
+    "AUCKLAND", "NORTHLAND", "WAIKATO", "BAY OF PLENTY", "GISBORNE",
+    "HAWKE'S BAY", "HAWKES BAY", "TARANAKI", "MANAWATU-WANGANUI",
+    "MANAWATU-WHANGANUI",
+}
+
+
+def _is_upper_north_island(destination: dict) -> bool:
+    """
+    True for the North Island north of Wellington (Auckland down to Manawatū/
+    Whanganui/Hawke's Bay). Wellington region and the whole South Island -> False.
+    Province is authoritative; postcode is the fallback when province is missing.
+    """
+    province = (destination.get("province") or "").upper().strip()
+    if province in _UPPER_NI_PROVINCES:
+        return True
+    if province in ("WGN", "WELLINGTON"):
+        return False
+    # Fallback by postcode: NI north of Wellington ≈ 0110–4999; Wellington region
+    # (~5000–6999) and South Island (7000+) fall through to False.
+    pc = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    try:
+        return 100 <= int(pc[:4]) < 5000
+    except (ValueError, TypeError):
+        return False
+
+
 async def get_location_stock(variant_ids: list) -> dict:
     """
     {variant_id(str): {"akl","akl_oh","chch","chch_oh"}} for the two NZ locations,
@@ -493,10 +525,15 @@ async def _route_decision(destination: dict, items: list):
             akl_q(must_akl),        chch_q(chch_only + dual),
             akl_q(must_akl + dual), chch_q(chch_only),
         )
+        # DUAL items may only be routed to Auckland (scenario B) for a customer in the
+        # North Island north of Wellington. Everyone else -> dual ships ex-Christchurch
+        # (scenario A). With no dual items, A and B are identical so the gate is moot.
+        allow_akl_dual = (not dual) or _is_upper_north_island(destination)
+
         opt = {}
         if aA.get("success") and cA.get("success"):
             opt["A"] = (must_akl, chch_only + dual, aA["customer_price"], cA["customer_price"])
-        if aB.get("success") and cB.get("success"):
+        if allow_akl_dual and aB.get("success") and cB.get("success"):
             opt["B"] = (must_akl + dual, chch_only, aB["customer_price"], cB["customer_price"])
         if not opt:
             return None
