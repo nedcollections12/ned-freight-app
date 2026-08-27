@@ -755,6 +755,58 @@ async def reload_rates():
     return {"status": "ok", "message": "Carrier rates reloaded"}
 
 
+# ─── Oversize (>1.5m, two-man) list ─────────────────────────────────────────────
+# Curated list of products too long to pallet or courier. A cart containing one is
+# forced onto Mainfreight M2H two-man (see live_rates._apply_service_rules). Stored
+# on the Render disk; a bad/missing file is treated as empty (no forcing) so it can
+# never block checkout.
+OVERSIZE_FILE = BASE_DIR / "data" / "oversize_items.json"
+
+
+def _load_oversize() -> list:
+    try:
+        return json.loads(OVERSIZE_FILE.read_text()) if OVERSIZE_FILE.exists() else []
+    except Exception:
+        return []
+
+
+def _save_oversize(data: list):
+    OVERSIZE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OVERSIZE_FILE.write_text(json.dumps(data, indent=2))
+    live_rates.reload_oversize_ids()  # refresh the in-memory set used at checkout
+
+
+@app.get("/api/oversize")
+async def oversize_list():
+    """The curated oversize (>1.5m two-man) product list — for the admin tab."""
+    return {"items": _load_oversize()}
+
+
+@app.put("/api/oversize", dependencies=[Depends(require_admin)])
+async def oversize_add(request: Request):
+    """Add/update one oversize product. Body: {product_id, title}. Idempotent by product_id."""
+    body = await request.json()
+    pid = str(body.get("product_id") or "").strip()
+    if not pid:
+        raise HTTPException(400, "product_id required")
+    title = (body.get("title") or "").strip()
+    items = [e for e in _load_oversize() if str(e.get("product_id")) != pid]
+    items.append({"product_id": pid, "title": title})
+    items.sort(key=lambda e: (e.get("title") or "").lower())
+    _save_oversize(items)
+    return {"status": "ok", "count": len(items), "items": items}
+
+
+@app.delete("/api/oversize/{product_id}", dependencies=[Depends(require_admin)])
+async def oversize_remove(product_id: str):
+    """Remove one product from the oversize list."""
+    pid = str(product_id).strip()
+    before = _load_oversize()
+    items = [e for e in before if str(e.get("product_id")) != pid]
+    _save_oversize(items)
+    return {"status": "ok", "removed": len(before) - len(items), "count": len(items), "items": items}
+
+
 @app.get("/api/carrier-info")
 async def carrier_info():
     """Return all carrier rate cards and metadata for the Carriers tab UI."""
@@ -810,6 +862,8 @@ async def cbm_list():
                 all_v.append({
                     "variant_id":   v["id"],
                     "inv_id":       v["inventoryItem"]["id"],
+                    # numeric product id (checkout payload keys on this) — for the oversize tab
+                    "product_id":   str(v["product"]["id"]).split("/")[-1],
                     "product":      v["product"]["title"],
                     "variant":      v["title"],
                     "sku":          v["sku"] or "",

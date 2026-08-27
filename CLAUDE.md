@@ -1,6 +1,6 @@
 # NED Freight App
 
-Live carrier-rate calculator for NED Collections' Shopify checkout. Replaces static delivery profiles with real-time quotes from Castle Parcels (live API), Mainfreight & Dailyfreight (formula). Also serves an embedded admin UI inside Shopify.
+Live carrier-rate calculator for NED Collections' Shopify checkout. Replaces static delivery profiles with real-time quotes from Castle Parcels (GoSweetSpot API) plus Mainfreight M2H and Dailyfreight LCL (both **live via the Mainfreight Rating API** — different account codes). The `carrier_rates.json` formulas are now only a **fallback** for a live-API miss, and are retired entirely when `LIVE_ONLY=1`. Also serves an embedded admin UI inside Shopify.
 
 ## What it does
 
@@ -68,6 +68,10 @@ Set in Render dashboard (Settings → Environment). All required unless marked o
 | `NED_MARKUP` | NED margin (default 1.10) |
 | `FREE_SHIPPING_THRESHOLD` | Free shipping over this cart value (default 999999 = effectively off) |
 | `APP_URL` | `https://ned-freight-app.onrender.com` (used by OAuth callback) |
+| `LIVE_ONLY` | `1` = live carrier APIs authoritative; retire the static rate-card formula fallbacks (a live miss + one retry → "Freight — Contact Us"). Default `0` (formula still backstops). |
+| `PALLET_RULE_ENABLED` | `1` = apply service rules (oversize → Mainfreight M2H two-man; cart CBM < `PALLET_MIN_CBM` → drop Dailyfreight LCL pallet). Default `0` = cheapest-wins as before. Fail-safe: never empties a non-empty quote set. |
+| `PALLET_MIN_CBM` | Below this cart CBM, don't ship on an LCL pallet alone (default 0.8). |
+| `MF_TIMEOUT` / `MF_RETRIES` | Mainfreight Rating API per-call timeout (default 4.0s) and extra retries on a transient miss — timeout/5xx/reset only (default 1). |
 
 ## Common operations
 

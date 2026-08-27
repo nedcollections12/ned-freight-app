@@ -110,6 +110,111 @@ def reload_carrier_rates():
     _carrier_rates_cache = None
 
 
+# ── Service-routing rules (live-only pricing + oversize / pallet) ─────────────
+# All of this is feature-flagged so it ships dark: with the flags off, quoting
+# behaves EXACTLY as before. Nothing here may ever produce a bare "no rate" for a
+# cart that would otherwise have quoted — every filter falls back to the full quote
+# set rather than block checkout (see _apply_service_rules).
+
+# LIVE_ONLY: make the live carrier APIs authoritative and retire the static
+# rate-card formula fallbacks from the pricing path. An unrecoverable live miss
+# then falls through to the existing "Freight — Contact Us" (never a 500).
+LIVE_ONLY = os.environ.get("LIVE_ONLY", "0") == "1"
+
+# PALLET_RULE_ENABLED: apply NED's service rules (oversize -> Two-Man; small cart
+# -> no LCL pallet). Off = today's pure cheapest-wins behaviour.
+PALLET_RULE_ENABLED = os.environ.get("PALLET_RULE_ENABLED", "0") == "1"
+
+# Below this cart CBM we don't put an order on an LCL pallet by itself — drop
+# Dailyfreight so a courier / Mainfreight Two-Man wins instead.
+PALLET_MIN_CBM = float(os.environ.get("PALLET_MIN_CBM", "0.8"))
+
+# Mainfreight Rating API resilience: one fast retry on a transient miss (timeout /
+# 5xx / connection reset) so a single blip doesn't drop MF/DF to "Contact Us" under
+# LIVE_ONLY. Under LIVE_ONLY the timeout tightens to 4s so call + retry still fits
+# Shopify's ~10s window (MF and DF run in parallel with the 9s GSS call, so the
+# envelope is unchanged). With LIVE_ONLY OFF the defaults are the ORIGINAL behaviour
+# (single 7s call, no retry) — so a flags-off deploy changes nothing at checkout;
+# the formula fallback still backstops a miss. Explicit env vars override either way.
+# 4xx and 200-without-charge are permanent — never retried.
+MF_TIMEOUT  = float(os.environ.get("MF_TIMEOUT", "4.0" if LIVE_ONLY else "7.0"))
+MF_RETRIES  = int(os.environ.get("MF_RETRIES", "1" if LIVE_ONLY else "0"))
+
+OVERSIZE_FILE = BASE_DIR / "data" / "oversize_items.json"
+_oversize_ids_cache = None
+
+
+def _load_oversize_ids() -> set:
+    """
+    Shopify product_ids flagged as >1.5m long — can't go on a pallet AND can't go
+    by courier, so a cart containing one is forced onto Mainfreight M2H two-man.
+    Curated in-app list (data/oversize_items.json), editable via the admin UI.
+    Fail-safe: any read/parse error -> empty set (no oversize forcing) so a bad file
+    never blocks checkout.
+    """
+    global _oversize_ids_cache
+    if _oversize_ids_cache is None:
+        try:
+            data = json.loads(OVERSIZE_FILE.read_text()) if OVERSIZE_FILE.exists() else []
+            _oversize_ids_cache = {str(e.get("product_id")) for e in data
+                                   if isinstance(e, dict) and e.get("product_id")}
+        except Exception:
+            logger.exception("oversize_items.json unreadable — treating as empty (no oversize forcing)")
+            _oversize_ids_cache = set()
+    return _oversize_ids_cache
+
+
+def reload_oversize_ids():
+    """Force reload of the oversize list from disk (for the admin /api/oversize writes)."""
+    global _oversize_ids_cache
+    _oversize_ids_cache = None
+
+
+def _cart_has_oversize(items: list) -> bool:
+    """True if any cart line is on the oversize (>1.5m) list."""
+    ids = _load_oversize_ids()
+    if not ids:
+        return False
+    return any(str(i.get("product_id") or "") in ids for i in items)
+
+
+# Carrier-class predicates — quotes carry {carrier, service}. Kept string-based to
+# match the live/formula quote shapes already produced below.
+def _is_courier_quote(q: dict) -> bool:
+    c = q.get("carrier", "") or ""
+    return any(t in c for t in ("Haste", "Castle", "Kiwi"))
+
+
+def _is_pallet_quote(q: dict) -> bool:
+    """Dailyfreight = LCL palletised service."""
+    return (q.get("carrier", "") or "") == "Dailyfreight"
+
+
+def _is_twoman_quote(q: dict) -> bool:
+    """Mainfreight = M2H two-man-into-home service."""
+    return (q.get("carrier", "") or "") == "Mainfreight"
+
+
+def _apply_service_rules(quotes: list, items: list, cart_cbm: float) -> list:
+    """
+    Filter carrier quotes by NED's service rules before cheapest-wins selection:
+      1. Any item >1.5m (oversize list) -> force Mainfreight M2H two-man.
+      2. Else cart CBM < PALLET_MIN_CBM -> drop Dailyfreight LCL pallet.
+      3. Else -> all carriers eligible.
+    FAIL-SAFE: if a filter would remove every quote (e.g. the forced carrier didn't
+    quote this lane), keep the original set — a rate always beats no rate at checkout.
+    """
+    if not quotes:
+        return quotes
+    if _cart_has_oversize(items):
+        twoman = [q for q in quotes if _is_twoman_quote(q)]
+        return twoman or quotes
+    if cart_cbm < PALLET_MIN_CBM:
+        non_pallet = [q for q in quotes if not _is_pallet_quote(q)]
+        return non_pallet or quotes
+    return quotes
+
+
 def _normalise_city(city: str) -> str:
     """
     Map a customer city to a rate-card city via alias table.
@@ -579,15 +684,25 @@ async def _mainfreight_rate(account: str, service: str, destination: dict,
         "Content-Type":  "application/json",
         "Accept":        "application/json",
     }
-    try:
-        r = await _client.post(MAINFREIGHT_URL, headers=H, json=body, timeout=7.0)
-        if r.status_code != 200:
+    # One fast retry on a transient miss (timeout / 5xx / connection reset). A 4xx or
+    # a 200 with no charge line is permanent (bad address, unratable lane) — return
+    # immediately, never loop. Keeps a single API blip from dropping to "Contact Us".
+    for attempt in range(MF_RETRIES + 1):
+        try:
+            r = await _client.post(MAINFREIGHT_URL, headers=H, json=body, timeout=MF_TIMEOUT)
+            if r.status_code == 200:
+                for c in r.json().get("charges", []):
+                    if c.get("name") == "TotalIncludingGSTAmount":
+                        return float(c.get("value", 0))
+                return None  # rated OK but no total charge -> not transient
+            if r.status_code < 500:
+                return None  # 4xx -> permanent, don't retry
+            # 5xx -> transient, fall through to retry
+        except (httpx.TimeoutException, httpx.TransportError):
+            pass  # transient network error -> retry
+        except Exception:
+            logger.exception("Mainfreight rate call failed unexpectedly (%s/%s)", account, service)
             return None
-        for c in r.json().get("charges", []):
-            if c.get("name") == "TotalIncludingGSTAmount":
-                return float(c.get("value", 0))
-    except Exception:
-        return None
     return None
 
 
@@ -735,22 +850,24 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     if cp:
         quotes.append(cp)
 
-    # Mainfreight — live API preferred; formula is the resilient fallback so a
-    # GSS/MF outage can never produce no_carrier_match for a known destination.
-    mf = mf_live or quote_mainfreight(cart_cbm, destination)
+    # Mainfreight — live API is authoritative. Under LIVE_ONLY the static rate-card
+    # formula is retired (a live miss + one retry falls through to "Contact Us");
+    # otherwise the formula stays as a resilient fallback for a full API outage.
+    mf = mf_live if LIVE_ONLY else (mf_live or quote_mainfreight(cart_cbm, destination))
     if mf:
         quotes.append(mf)
 
     # Dailyfreight — same pattern.
-    df = df_live or quote_dailyfreight(cart_cbm, destination)
+    df = df_live if LIVE_ONLY else (df_live or quote_dailyfreight(cart_cbm, destination))
     if df:
         quotes.append(df)
 
     # Postcode/province fallback: if neither formula carrier matched the city
     # name (e.g. Google put a suburb in the city field), resolve by postcode
     # then region so we never drop to no_carrier_match for a real NZ address.
-    # Only triggers when both MF and DF missed, so existing pricing is untouched.
-    if not mf and not df:
+    # Only triggers when both MF and DF missed. Formula-based, so skipped under
+    # LIVE_ONLY (live quotes key off postcode+city directly and don't need it).
+    if not mf and not df and not LIVE_ONLY:
         fb = _fallback_keys(destination)
         if fb:
             mf_key, df_key = fb
@@ -772,8 +889,14 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
             "quotes": [],
         }
 
-    # Pick cheapest of available
-    cheapest = min(quotes, key=lambda q: q["raw_cost"])
+    # Apply NED's service rules (oversize -> Two-Man; small cart -> no LCL pallet)
+    # before selection. Flag-gated and fail-safe: never empties a non-empty set.
+    # Keep the FULL quote set for the debug/rate-log view so we can see what was
+    # dropped and why; select only from the eligible set.
+    eligible = _apply_service_rules(quotes, items, cart_cbm) if PALLET_RULE_ENABLED else quotes
+
+    # Pick cheapest of eligible
+    cheapest = min(eligible, key=lambda q: q["raw_cost"])
     customer_price = round(cheapest["raw_cost"] * NED_MARKUP, 2)
 
     result = {
@@ -786,6 +909,12 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
         "customer_price":  customer_price,
     }
     if debug:
-        result["all_quotes"] = quotes
+        result["all_quotes"] = quotes  # full set considered
+        result["eligible_quotes"] = eligible  # after service-rule filtering
+        result["rule_applied"] = (
+            "oversize->two_man" if (PALLET_RULE_ENABLED and _cart_has_oversize(items))
+            else "small_cart->no_pallet" if (PALLET_RULE_ENABLED and cart_cbm < PALLET_MIN_CBM)
+            else "none"
+        )
         result["destination"] = destination
     return result

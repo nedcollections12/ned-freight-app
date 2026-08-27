@@ -119,6 +119,7 @@
   <button class="active" data-tab="cbm">Product CBMs</button>
   <button data-tab="tester">Test a quote</button>
   <button data-tab="carriers">Carrier rate cards</button>
+  <button data-tab="oversize">Oversize / two-man</button>
   <button data-tab="ratelog">Rate log</button>
   <button data-tab="docs">How it works</button>
 </nav>
@@ -239,6 +240,24 @@
       <h2>Carrier rate cards</h2>
       <p class="hint">Reference rate cards and technicalities for each carrier NED Freight quotes from. Live carrier costs at checkout use the formulas / API calls below.</p>
       <div id="carriers-content" class="loading">Loading…</div>
+    </div>
+  </section>
+
+  <!-- TAB: Oversize / two-man -->
+  <section class="tab" id="tab-oversize">
+    <div class="card">
+      <h2>Oversize / two-man items</h2>
+      <p class="hint">Products longer than <strong>1.5m</strong> that can't go on a pallet or by courier.
+        Any cart containing one is forced onto <strong>Mainfreight M2H two-man</strong> at checkout
+        (no courier, no pallet). Search your products and toggle them on the list.</p>
+      <div class="row" style="margin-bottom: 12px;">
+        <input type="search" id="oversize-search" placeholder="Search products to add…">
+        <button class="btn btn-secondary" onclick="loadOversize(true)">Refresh</button>
+      </div>
+      <h3 style="margin:14px 0 6px;">On the list (<span id="oversize-count">0</span>)</h3>
+      <div id="oversize-current" class="loading">Loading…</div>
+      <h3 style="margin:18px 0 6px;">Search results</h3>
+      <div id="oversize-results"><p class="hint">Type above to find products to add.</p></div>
     </div>
   </section>
 
@@ -377,7 +396,99 @@ document.querySelectorAll('nav button').forEach(btn => {
     if (btn.dataset.tab === 'cbm' && allVariants.length === 0) loadCbm();
     if (btn.dataset.tab === 'carriers' && !window._carriersLoaded) loadCarriers();
     if (btn.dataset.tab === 'ratelog') loadRateLog();
+    if (btn.dataset.tab === 'oversize') loadOversize();
   });
+});
+
+// ── Oversize / two-man tab ─────────────────────────────────────────────────
+// Curated list of >1.5m products; a cart with one is forced onto Mainfreight
+// M2H two-man. Products are sourced (deduped) from the CBM variant list.
+let _oversizeSet = new Set();   // product_ids currently on the list
+
+async function loadOversize(refreshProducts) {
+  const cur = document.getElementById('oversize-current');
+  try {
+    const r = await fetch('/api/oversize');
+    const data = await r.json();
+    const items = data.items || [];
+    _oversizeSet = new Set(items.map(i => String(i.product_id)));
+    document.getElementById('oversize-count').textContent = items.length;
+    cur.innerHTML = items.length
+      ? '<table class="rate-table"><tbody>' + items.map(i =>
+          `<tr><td>${_esc(i.title) || '(untitled)'}</td>`
+        + `<td class="hint">#${_esc(i.product_id)}</td>`
+        + `<td style="text-align:right"><button class="btn btn-secondary" onclick="removeOversize('${_esc(i.product_id)}')">Remove</button></td></tr>`
+        ).join('') + '</tbody></table>'
+      : '<p class="hint">No items yet. Add any product longer than 1.5m below.</p>';
+  } catch (e) {
+    cur.innerHTML = '<p class="hint">Could not load the list.</p>';
+  }
+  // Ensure we have the product catalogue for search (reuse the CBM variant list)
+  if (refreshProducts || allVariants.length === 0) {
+    try { await loadCbm(refreshProducts); } catch (e) {}
+  }
+}
+
+function _uniqueProducts(query) {
+  const q = (query || '').toLowerCase().trim();
+  const seen = new Set(), out = [];
+  for (const v of allVariants) {
+    const pid = String(v.product_id || '');
+    if (!pid || seen.has(pid)) continue;
+    if (q && !(v.product || '').toLowerCase().includes(q)) continue;
+    seen.add(pid);
+    out.push({ product_id: pid, title: v.product });
+    if (out.length >= 50) break;
+  }
+  return out;
+}
+
+function renderOversizeResults() {
+  const q = document.getElementById('oversize-search').value;
+  const box = document.getElementById('oversize-results');
+  if (!q.trim()) { box.innerHTML = '<p class="hint">Type above to find products to add.</p>'; return; }
+  const rows = _uniqueProducts(q);
+  box.innerHTML = rows.length
+    ? '<table class="rate-table"><tbody>' + rows.map(p => {
+        const on = _oversizeSet.has(p.product_id);
+        return `<tr><td>${_esc(p.title)}</td><td class="hint">#${_esc(p.product_id)}</td>`
+          + `<td style="text-align:right">` + (on
+            ? '<span style="color:#2e7d32">✓ on list</span>'
+            : `<button class="btn btn-primary" onclick="addOversize('${_esc(p.product_id)}')">Add</button>`)
+          + `</td></tr>`;
+      }).join('') + '</tbody></table>'
+    : '<p class="hint">No matching products.</p>';
+}
+
+async function addOversize(productId) {
+  // Look the title up by id so no title text ever passes through an HTML attribute.
+  const match = allVariants.find(v => String(v.product_id) === String(productId));
+  const title = match ? match.product : '';
+  try {
+    const r = await fetch('/api/oversize', {
+      method: 'PUT', headers: adminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ product_id: productId, title })
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await loadOversize();
+    renderOversizeResults();
+  } catch (e) { alert('Could not add: ' + e.message); }
+}
+
+async function removeOversize(productId) {
+  try {
+    const r = await fetch('/api/oversize/' + encodeURIComponent(productId), {
+      method: 'DELETE', headers: adminHeaders()
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await loadOversize();
+    renderOversizeResults();
+  } catch (e) { alert('Could not remove: ' + e.message); }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const os = document.getElementById('oversize-search');
+  if (os) os.addEventListener('input', renderOversizeResults);
 });
 
 // ── Rate log tab ──────────────────────────────────────────────────────────
