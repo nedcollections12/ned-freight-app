@@ -1,84 +1,83 @@
 {%- comment -%}
-  NED — Product-page per-warehouse stock display.
+  NED — Product-page per-warehouse stock (pure Liquid + metafields, no app proxy).
 
   Trade customers (logged in, carrying the trade tag) see EXACT per-warehouse
   levels + incoming; retail/anonymous see only a location badge (no numbers).
-  All gating is server-side in the freight app; this snippet just renders whatever
-  the endpoint returns.
+  Gating is SERVER-SIDE: the numbers are only emitted into the page HTML inside the
+  `is_trade` block, so retail never receives them — Shopify renders Liquid per
+  logged-in customer.
+
+  DATA: fed by the `ned-incoming-sync` Railway cron, which writes these variant
+  metafields (custom namespace, storefront-readable):
+    stock_akl, stock_chch  (current available per warehouse)
+    incoming_qty, incoming_warehouse, arrival_date  (already synced)
 
   SETUP
-  1. Shopify Admin → Apps → (the "Claude API" app) → App proxy:
-       Subpath prefix : apps
-       Subpath        : stock
-       Proxy URL      : https://ned-freight-app.onrender.com/api/product-stock
-  2. Paste this snippet into the product template (e.g. sections/main-product or a
-     product snippet), where you want the stock line to appear.
-  3. If your App Proxy subpath differs, change STOCK_PROXY_PATH below.
+  1. Deploy the updated ned-incoming-sync so stock_akl/stock_chch populate.
+  2. Paste this snippet into the product template where the stock line should show.
+  3. If your trade tag isn't 'wholesale', change TRADE_TAG below.
 {%- endcomment -%}
 
-<div id="ned-wh-stock" data-product-id="{{ product.id }}" style="margin:10px 0;font-size:14px;"></div>
+{%- assign TRADE_TAG = 'wholesale' -%}
+{%- assign is_trade = false -%}
+{%- if customer and customer.tags contains TRADE_TAG -%}{%- assign is_trade = true -%}{%- endif -%}
 
+<div id="ned-wh-stock" style="margin:10px 0;font-size:14px;"></div>
+<script type="application/json" id="ned-wh-stock-data">
+{
+{%- for v in product.variants -%}
+  {%- assign akl = v.metafields.custom.stock_akl | default: 0 -%}
+  {%- assign chch = v.metafields.custom.stock_chch | default: 0 -%}
+  "{{ v.id }}": {
+    "akl_in": {% if akl > 0 %}true{% else %}false{% endif %},
+    "chch_in": {% if chch > 0 %}true{% else %}false{% endif %}
+    {%- if is_trade -%}
+    , "akl": {{ akl }}, "chch": {{ chch }}
+    , "incoming": {{ v.metafields.custom.incoming_qty | default: 0 }}
+    , "incoming_warehouse": {{ v.metafields.custom.incoming_warehouse | default: '' | json }}
+    , "arrival_date": {{ v.metafields.custom.arrival_date | default: '' | json }}
+    {%- endif -%}
+  }{%- unless forloop.last -%},{%- endunless -%}
+{%- endfor -%}
+}
+</script>
 <script>
 (function () {
-  var STOCK_PROXY_PATH = "/apps/stock"; // must match the App Proxy subpath
+  var TRADE = {{ is_trade | json }};
   var el = document.getElementById("ned-wh-stock");
-  if (!el) return;
-  var productId = el.getAttribute("data-product-id");
-  var byVariant = null; // { variant_id: record }
-  var isTrade = false;
+  var data;
+  try { data = JSON.parse(document.getElementById("ned-wh-stock-data").textContent); } catch (e) { return; }
 
   function currentVariantId() {
-    // URL ?variant= wins; else the product form's hidden id input.
     var u = new URLSearchParams(location.search).get("variant");
     if (u) return String(u);
     var input = document.querySelector('form[action*="/cart/add"] [name="id"]');
     return input ? String(input.value) : null;
   }
-
   function fmtDate(d) {
     if (!d) return "";
     try { return new Date(d).toLocaleDateString("en-NZ", { day: "numeric", month: "short", year: "numeric" }); }
     catch (e) { return d; }
   }
-
   function render() {
-    if (!byVariant) return;
-    var vid = currentVariantId();
-    var r = (vid && byVariant[vid]) || null;
+    var r = data[currentVariantId()];
     if (!r) { el.innerHTML = ""; return; }
-
-    if (isTrade) {
-      var parts = [];
-      parts.push("Auckland: <strong>" + (r.akl || 0) + "</strong>");
-      parts.push("Christchurch: <strong>" + (r.chch || 0) + "</strong>");
-      var line = "In stock — " + parts.join(" &nbsp;·&nbsp; ");
+    if (TRADE) {
+      var line = "In stock — Auckland: <strong>" + (r.akl || 0) + "</strong> &nbsp;·&nbsp; Christchurch: <strong>" + (r.chch || 0) + "</strong>";
       if (r.incoming) {
         line += '<div style="color:#8a6d3b;margin-top:4px;">' + r.incoming + " incoming"
               + (r.incoming_warehouse ? " to " + r.incoming_warehouse : "")
               + (r.arrival_date ? " (arriving " + fmtDate(r.arrival_date) + ")" : "") + "</div>";
       }
-      el.innerHTML = '<div>' + line + '</div>';
+      el.innerHTML = "<div>" + line + "</div>";
     } else {
-      // Retail: location badge only, no numbers.
-      var label = { "AKL & CHCH": "Auckland & Christchurch", "AKL": "Auckland", "CHCH": "Christchurch" }[r.location];
-      el.innerHTML = label ? '<div>In stock — ships from <strong>' + label + "</strong></div>" : "";
+      var label = r.akl_in && r.chch_in ? "Auckland & Christchurch" : r.akl_in ? "Auckland" : r.chch_in ? "Christchurch" : null;
+      el.innerHTML = label ? "<div>In stock — ships from <strong>" + label + "</strong></div>" : "";
     }
   }
-
-  fetch(STOCK_PROXY_PATH + "?product_id=" + encodeURIComponent(productId), { credentials: "include" })
-    .then(function (res) { return res.ok ? res.json() : null; })
-    .then(function (data) {
-      if (!data || !data.variants) return;
-      isTrade = !!data.trade;
-      byVariant = {};
-      data.variants.forEach(function (v) { byVariant[String(v.variant_id)] = v; });
-      render();
-    })
-    .catch(function () { /* fail silent — never break the PDP */ });
-
-  // Re-render on variant change (covers most themes).
+  render();
   document.addEventListener("change", function (e) {
-    if (e.target && (e.target.name === "id" || e.target.matches('[name^="options"]'))) setTimeout(render, 50);
+    if (e.target && (e.target.name === "id" || (e.target.matches && e.target.matches('[name^="options"]')))) setTimeout(render, 50);
   });
   window.addEventListener("popstate", render);
 })();
