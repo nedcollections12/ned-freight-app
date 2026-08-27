@@ -235,15 +235,11 @@ async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
 
     rates_out = []
 
-    # Add a "PICK UP - Wigram Warehouse" option for Canterbury customers only
-    if _is_canterbury(destination) and await _all_at_chch(items):
-        rates_out.append({
-            "service_name": "PICK UP - Wigram Warehouse",
-            "service_code": "PICKUP",
-            "total_price":  "0",
-            "currency":     currency,
-            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
-        })
+    # NB: whole-order pickup (Wigram / Auckland) is now handled by Shopify's native
+    # Local Pickup (enabled on both locations), so the old custom "PICK UP" $0 rate
+    # was removed here to avoid a duplicate pickup option at checkout. Partial
+    # "collect half + ship the rest" (which native can't do) still lives in
+    # _auckland_routing.
 
     if not result.get("success"):
         # No carrier matched — only show pickup (if available) or "Contact us"
@@ -546,24 +542,23 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         is_ni = _is_north_island(destination)
 
         if akl_grp and chch_grp:
-            note = "Your order ships from multiple warehouses (Auckland + Christchurch) — 3 to 5 business days."
+            note = ("Ships from two warehouses (Auckland + Christchurch) as 2 parcels — "
+                    "they may arrive on different days, tracked separately. 3 to 5 business days.")
         elif akl_grp:
             note = "Ships from our Auckland warehouse — 3 to 5 business days."
         else:
             note = "3 to 5 business days."
         rates = [_std_rate(total, gst_divisor, currency, f"{note} {CONTACT_NOTE}")]
 
-        if is_ni and d["collectable"]:
-            if not d["chch_only"]:
-                rates.append(_akl_rate(
-                    "PICK UP - Auckland Warehouse", "PICKUP_AKL", 0, currency,
-                    "Collect from our Auckland warehouse, 86 Ascot Road, Māngere. "
-                    "We'll email you when it's ready."))
-            elif d["chch_only_price"] is not None:
-                cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
-                rates.append(_akl_rate(
-                    "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
-                    "Collect Auckland-stocked items from Māngere; the rest ships from Christchurch."))
+        # Whole-order Auckland pickup is now Shopify native Local Pickup; we only keep
+        # the PARTIAL "collect the Auckland items, ship the Christchurch ones" option
+        # (native pickup can't split a cart). Only offered to NI customers with a
+        # genuinely mixed cart (some Auckland-collectable + some Christchurch-only).
+        if is_ni and d["collectable"] and d["chch_only"] and d["chch_only_price"] is not None:
+            cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
+            rates.append(_akl_rate(
+                "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
+                "Collect Auckland-stocked items from Māngere; the rest ships from Christchurch."))
 
         # Canterbury customer with an Auckland-only item in a mixed cart: let them collect
         # the Christchurch-held items from Wigram and ship only the Auckland-only items.
@@ -681,14 +676,7 @@ async def shopify_rates_b2b(request: Request):
 
     rates_out = []
 
-    if _is_canterbury(destination) and await _all_at_chch(items):
-        rates_out.append({
-            "service_name": "PICK UP - Wigram Warehouse",
-            "service_code": "PICKUP",
-            "total_price":  "0",
-            "currency":     currency,
-            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
-        })
+    # Whole-order pickup is now Shopify native Local Pickup (both locations enabled).
 
     if not result.get("success"):
         rate_log.log_rate(destination=destination, items=items, result=result,
