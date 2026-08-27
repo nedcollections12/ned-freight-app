@@ -235,11 +235,18 @@ async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
 
     rates_out = []
 
-    # NB: whole-order pickup (Wigram / Auckland) is now handled by Shopify's native
-    # Local Pickup (enabled on both locations), so the old custom "PICK UP" $0 rate
-    # was removed here to avoid a duplicate pickup option at checkout. Partial
-    # "collect half + ship the rest" (which native can't do) still lives in
-    # _auckland_routing.
+    # "PICK UP - Wigram Warehouse" as a $0 CARRIER rate for Canterbury all-CHCH carts.
+    # Restored 2026-08-28: native Local Pickup doesn't surface reliably for B2B
+    # checkouts (it collapsed B2B to pickup-only, dropping ship), so pickup stays a
+    # carrier rate that sits alongside Standard Delivery for everyone.
+    if _is_canterbury(destination) and await _all_at_chch(items):
+        rates_out.append({
+            "service_name": "PICK UP - Wigram Warehouse",
+            "service_code": "PICKUP",
+            "total_price":  "0",
+            "currency":     currency,
+            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
+        })
 
     if not result.get("success"):
         # No carrier matched — only show pickup (if available) or "Contact us"
@@ -550,15 +557,20 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
             note = "3 to 5 business days."
         rates = [_std_rate(total, gst_divisor, currency, f"{note} {CONTACT_NOTE}")]
 
-        # Whole-order Auckland pickup is now Shopify native Local Pickup; we only keep
-        # the PARTIAL "collect the Auckland items, ship the Christchurch ones" option
-        # (native pickup can't split a cart). Only offered to NI customers with a
-        # genuinely mixed cart (some Auckland-collectable + some Christchurch-only).
-        if is_ni and d["collectable"] and d["chch_only"] and d["chch_only_price"] is not None:
-            cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
-            rates.append(_akl_rate(
-                "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
-                "Collect Auckland-stocked items from Māngere; the rest ships from Christchurch."))
+        # Pickup as a $0 carrier rate (restored 2026-08-28 — native Local Pickup
+        # collapsed B2B checkout to pickup-only). Full Auckland pickup when the whole
+        # cart is collectable there; else the PARTIAL collect (native can't split a cart).
+        if is_ni and d["collectable"]:
+            if not d["chch_only"]:
+                rates.append(_akl_rate(
+                    "PICK UP - Auckland Warehouse", "PICKUP_AKL", 0, currency,
+                    "Collect from our Auckland warehouse, 86 Ascot Road, Māngere. "
+                    "We'll email you when it's ready."))
+            elif d["chch_only_price"] is not None:
+                cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
+                rates.append(_akl_rate(
+                    "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
+                    "Collect Auckland-stocked items from Māngere; the rest ships from Christchurch."))
 
         # Canterbury customer with an Auckland-only item in a mixed cart: let them collect
         # the Christchurch-held items from Wigram and ship only the Auckland-only items.
@@ -676,7 +688,16 @@ async def shopify_rates_b2b(request: Request):
 
     rates_out = []
 
-    # Whole-order pickup is now Shopify native Local Pickup (both locations enabled).
+    # "PICK UP - Wigram Warehouse" $0 carrier rate for Canterbury all-CHCH B2B carts
+    # (restored 2026-08-28 — native Local Pickup collapsed B2B checkout to pickup-only).
+    if _is_canterbury(destination) and await _all_at_chch(items):
+        rates_out.append({
+            "service_name": "PICK UP - Wigram Warehouse",
+            "service_code": "PICKUP",
+            "total_price":  "0",
+            "currency":     currency,
+            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
+        })
 
     if not result.get("success"):
         rate_log.log_rate(destination=destination, items=items, result=result,
