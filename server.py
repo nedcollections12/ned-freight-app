@@ -1,6 +1,6 @@
 """NED Freight App — FastAPI Server"""
 
-import json, math, os, hmac, hashlib, logging
+import json, math, os, hmac, hashlib, logging, time
 from pathlib import Path
 from typing import Optional
 # Load .env before importing anything that reads env vars
@@ -826,45 +826,16 @@ def _shopify_headers():
     raise HTTPException(401, "No Shopify token configured")
 
 
-# ─── Product-page per-warehouse stock (Shopify App Proxy) ────────────────────
-# Powers the PDP stock display: TRADE customers see exact per-warehouse levels +
-# incoming; retail/anonymous see only a location badge (AKL / CHCH / AKL & CHCH),
-# never numbers. Trade-only numbers are gated SERVER-SIDE — the theme can't be
-# trusted — by verifying the Shopify app-proxy signature and checking the signed
-# logged_in_customer_id's tags. Read-only; inert until the theme calls it.
-TRADE_TAGS = {t.strip().lower() for t in os.environ.get("TRADE_TAGS", "wholesale").split(",") if t.strip()}
-
-
-def _verify_app_proxy_signature(request: Request) -> bool:
-    """Verify a Shopify App Proxy request signature (HMAC-SHA256 hex over the sorted
-    query params, excluding `signature`, using the app shared secret). Fail-closed."""
-    if not SHOPIFY_API_SECRET:
-        return False
-    params = dict(request.query_params)
-    sig = params.pop("signature", "")
-    if not sig:
-        return False
-    msg = "".join(f"{k}={v}" for k, v in sorted(params.items()))
-    digest = hmac.new(SHOPIFY_API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(digest, sig)
-
-
-async def _customer_is_trade(customer_id: str) -> bool:
-    """True if the logged-in customer carries a configured trade tag. Fail-safe: any
-    error / no customer -> False (treated as retail, so numbers are never leaked)."""
-    if not customer_id:
-        return False
-    try:
-        gql = f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json"
-        q = "query($id: ID!){ customer(id:$id){ tags } }"
-        gid = f"gid://shopify/Customer/{customer_id}"
-        async with httpx.AsyncClient(timeout=6.0) as c:
-            r = await c.post(gql, headers=_shopify_headers(), json={"query": q, "variables": {"id": gid}})
-        tags = ((r.json().get("data") or {}).get("customer") or {}).get("tags") or []
-        return bool({t.lower() for t in tags} & TRADE_TAGS)
-    except Exception:
-        logger.exception("customer trade-tag lookup failed for %s", customer_id)
-        return False
+# ─── Product-page per-warehouse stock (public, cached) ───────────────────────
+# Powers the PDP stock display. The theme fetches this LIVE on page load and
+# decides what to show: trade customers (gated in Liquid by customer.tags) render
+# the exact per-warehouse levels; retail render only a location badge. The endpoint
+# returns the full split to anyone — display gating is the theme's job — so this is
+# "soft" gating by design (a retail visitor could read the raw split via the URL).
+# A short in-memory cache stops a hammered public endpoint from exhausting the
+# Shopify Admin API that checkout freight quoting also depends on.
+_STOCK_CACHE = {}                      # product_id -> (ts, payload)
+_STOCK_CACHE_TTL = float(os.environ.get("PRODUCT_STOCK_TTL", "30"))
 
 
 def _stock_location_label(akl: int, chch: int) -> str:
@@ -878,10 +849,11 @@ def _stock_location_label(akl: int, chch: int) -> str:
     return "OUT"
 
 
-async def _product_stock_display(product_id: str, is_trade: bool) -> dict:
-    """Per-variant stock for the PDP. Trade -> exact AKL/CHCH available + incoming;
-    retail -> location label only. Reads live per-location availability + the
-    incoming_* metafields in one query."""
+async def _product_stock_display(product_id: str) -> dict:
+    """Per-variant live per-warehouse availability + incoming for the PDP. Returns
+    the full split (akl/chch/incoming) plus a retail location label; the THEME
+    decides which to show. Reads live per-location availability + incoming_*
+    metafields in one query."""
     gql = f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json"
     q = """
     query($id: ID!) {
@@ -915,36 +887,36 @@ async def _product_stock_display(product_id: str, is_trade: bool) -> dict:
             elif loc == CHCH_LOCATION_ID:
                 chch = qty
         rec = {"variant_id": str(v.get("legacyResourceId") or ""),
-               "location": _stock_location_label(akl, chch)}
-        if is_trade:
-            rec["akl"] = akl
-            rec["chch"] = chch
-            inc = (v.get("inc") or {}).get("value")
-            if inc:
-                rec["incoming"] = int(inc)
-                rec["incoming_warehouse"] = (v.get("incW") or {}).get("value") or ""
-                rec["arrival_date"] = (v.get("eta") or {}).get("value") or ""
+               "location": _stock_location_label(akl, chch),
+               "akl": akl, "chch": chch}
+        inc = (v.get("inc") or {}).get("value")
+        if inc:
+            rec["incoming"] = int(inc)
+            rec["incoming_warehouse"] = (v.get("incW") or {}).get("value") or ""
+            rec["arrival_date"] = (v.get("eta") or {}).get("value") or ""
         out.append(rec)
-    return {"trade": is_trade, "variants": out}
+    return {"variants": out}
 
 
 @app.get("/api/product-stock")
-async def product_stock(request: Request, product_id: str = ""):
-    """App-proxy endpoint for the PDP stock display. Trade customers (verified via
-    the signed logged_in_customer_id) get exact per-warehouse levels; everyone else
-    gets a location badge only. Fail-safe: on any doubt, retail view (no numbers)."""
-    if not _verify_app_proxy_signature(request):
-        raise HTTPException(403, "Invalid app proxy signature")
+async def product_stock(product_id: str = ""):
+    """Public PDP stock endpoint — live per-warehouse availability + incoming for a
+    product's variants. The theme fetches this and gates the display (trade shows
+    numbers, retail a badge). Short-TTL cached so it can't hammer the Shopify Admin
+    API that checkout freight also uses. Fail-safe: empty payload on any error."""
     if not product_id:
         raise HTTPException(400, "product_id required")
-    customer_id = request.query_params.get("logged_in_customer_id", "")
-    is_trade = await _customer_is_trade(customer_id)
+    now = time.time()
+    hit = _STOCK_CACHE.get(product_id)
+    if hit and (now - hit[0]) < _STOCK_CACHE_TTL:
+        return hit[1]
     try:
-        return await _product_stock_display(product_id, is_trade)
-    except Exception as e:
+        payload = await _product_stock_display(product_id)
+        _STOCK_CACHE[product_id] = (now, payload)
+        return payload
+    except Exception:
         logger.exception("product-stock failed for %s", product_id)
-        # Never break the PDP — return an empty retail-shaped payload.
-        return {"trade": False, "variants": [], "error": f"{type(e).__name__}"}
+        return {"variants": []}
 
 
 @app.get("/api/cbm-list")

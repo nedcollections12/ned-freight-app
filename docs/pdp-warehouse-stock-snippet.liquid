@@ -1,52 +1,35 @@
 {%- comment -%}
-  NED — Product-page per-warehouse stock (pure Liquid + metafields, no app proxy).
+  NED — Product-page per-warehouse stock (LIVE fetch, real-time).
 
-  Trade customers (logged in, carrying the trade tag) see EXACT per-warehouse
-  levels + incoming; retail/anonymous see only a location badge (no numbers).
-  Gating is SERVER-SIDE: the numbers are only emitted into the page HTML inside the
-  `is_trade` block, so retail never receives them — Shopify renders Liquid per
-  logged-in customer.
+  The total stock number your theme already shows is native/real-time; Shopify just
+  doesn't expose the per-WAREHOUSE split to Liquid. This snippet fetches that split
+  live from the freight app on page load, so it's real-time too.
 
-  DATA: fed by the `ned-incoming-sync` Railway cron, which writes these variant
-  metafields (custom namespace, storefront-readable):
-    stock_akl, stock_chch  (current available per warehouse)
-    incoming_qty, incoming_warehouse, arrival_date  (already synced)
+  Trade customers (logged in, carrying the trade tag) see exact per-warehouse levels
+  + incoming; retail/anonymous see only a location badge (no numbers). The trade flag
+  is set in Liquid (server-side) from customer.tags; display gating is client-side.
+  NOTE: the endpoint returns the raw split to any caller (display-only gating), which
+  is the accepted trade-off for real-time without an app proxy.
 
   SETUP
-  1. Deploy the updated ned-incoming-sync so stock_akl/stock_chch populate.
-  2. Paste this snippet into the product template where the stock line should show.
-  3. If your trade tag isn't 'wholesale', change TRADE_TAG below.
+  1. Paste this into the product template where the stock line should appear.
+  2. If your trade tag isn't 'wholesale', change TRADE_TAG below.
+  3. If the freight app domain changes, update STOCK_URL.
 {%- endcomment -%}
 
 {%- assign TRADE_TAG = 'wholesale' -%}
 {%- assign is_trade = false -%}
 {%- if customer and customer.tags contains TRADE_TAG -%}{%- assign is_trade = true -%}{%- endif -%}
 
-<div id="ned-wh-stock" style="margin:10px 0;font-size:14px;"></div>
-<script type="application/json" id="ned-wh-stock-data">
-{
-{%- for v in product.variants -%}
-  {%- assign akl = v.metafields.custom.stock_akl | default: 0 -%}
-  {%- assign chch = v.metafields.custom.stock_chch | default: 0 -%}
-  "{{ v.id }}": {
-    "akl_in": {% if akl > 0 %}true{% else %}false{% endif %},
-    "chch_in": {% if chch > 0 %}true{% else %}false{% endif %}
-    {%- if is_trade -%}
-    , "akl": {{ akl }}, "chch": {{ chch }}
-    , "incoming": {{ v.metafields.custom.incoming_qty | default: 0 }}
-    , "incoming_warehouse": {{ v.metafields.custom.incoming_warehouse | default: '' | json }}
-    , "arrival_date": {{ v.metafields.custom.arrival_date | default: '' | json }}
-    {%- endif -%}
-  }{%- unless forloop.last -%},{%- endunless -%}
-{%- endfor -%}
-}
-</script>
+<div id="ned-wh-stock" data-product-id="{{ product.id }}" style="margin:10px 0;font-size:14px;"></div>
 <script>
 (function () {
+  var STOCK_URL = "https://ned-freight-app.onrender.com/api/product-stock";
   var TRADE = {{ is_trade | json }};
   var el = document.getElementById("ned-wh-stock");
-  var data;
-  try { data = JSON.parse(document.getElementById("ned-wh-stock-data").textContent); } catch (e) { return; }
+  if (!el) return;
+  var productId = el.getAttribute("data-product-id");
+  var byVariant = null;
 
   function currentVariantId() {
     var u = new URLSearchParams(location.search).get("variant");
@@ -60,7 +43,8 @@
     catch (e) { return d; }
   }
   function render() {
-    var r = data[currentVariantId()];
+    if (!byVariant) return;
+    var r = byVariant[currentVariantId()];
     if (!r) { el.innerHTML = ""; return; }
     if (TRADE) {
       var line = "In stock — Auckland: <strong>" + (r.akl || 0) + "</strong> &nbsp;·&nbsp; Christchurch: <strong>" + (r.chch || 0) + "</strong>";
@@ -71,11 +55,21 @@
       }
       el.innerHTML = "<div>" + line + "</div>";
     } else {
-      var label = r.akl_in && r.chch_in ? "Auckland & Christchurch" : r.akl_in ? "Auckland" : r.chch_in ? "Christchurch" : null;
+      var label = { "AKL & CHCH": "Auckland & Christchurch", "AKL": "Auckland", "CHCH": "Christchurch" }[r.location];
       el.innerHTML = label ? "<div>In stock — ships from <strong>" + label + "</strong></div>" : "";
     }
   }
-  render();
+
+  fetch(STOCK_URL + "?product_id=" + encodeURIComponent(productId))
+    .then(function (res) { return res.ok ? res.json() : null; })
+    .then(function (data) {
+      if (!data || !data.variants) return;
+      byVariant = {};
+      data.variants.forEach(function (v) { byVariant[String(v.variant_id)] = v; });
+      render();
+    })
+    .catch(function () { /* fail silent — never break the PDP */ });
+
   document.addEventListener("change", function (e) {
     if (e.target && (e.target.name === "id" || (e.target.matches && e.target.matches('[name^="options"]')))) setTimeout(render, 50);
   });
