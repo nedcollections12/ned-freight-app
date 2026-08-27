@@ -37,10 +37,17 @@ check("no MF -> original set kept",
       carriers(lr._apply_service_rules([CP, KIWI, DF], OVER, 1.2)),
       ["Dailyfreight", "Kiwi Express", "Post Haste - Freight Forwards"])
 
-print("Rule 2 — small cart (<0.8m3) -> drop Dailyfreight pallet")
-check("drops DF, keeps courier+MF",
+print("Rule 2 — small cart, courier CHEAPER than pallet -> drop pallet (courier wins anyway)")
+# CP=20, DF=60 -> non-pallet cheaper -> pallet dropped
+check("cheaper courier -> DF dropped",
       carriers(lr._apply_service_rules([CP, MF, DF], NORMAL, 0.3)),
       ["Mainfreight", "Post Haste - Freight Forwards"])
+
+print("Rule 2 refined — small MEDIUM cart, pallet CHEAPEST (no courier) -> KEEP pallet (no perverse +$)")
+# only DF(60) + MF(90) two-man; pallet is cheapest -> must NOT force two-man
+check("pallet cheapest -> kept (not forced to two-man)",
+      carriers(lr._apply_service_rules([MF, DF], NORMAL, 0.68)),
+      ["Dailyfreight", "Mainfreight"])
 
 print("Rule 2 fail-safe — small cart but ONLY DF quoted -> keep DF (never block)")
 check("only DF -> kept",

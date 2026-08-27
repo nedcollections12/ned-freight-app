@@ -199,7 +199,11 @@ def _apply_service_rules(quotes: list, items: list, cart_cbm: float) -> list:
     """
     Filter carrier quotes by NED's service rules before cheapest-wins selection:
       1. Any item >1.5m (oversize list) -> force Mainfreight M2H two-man.
-      2. Else cart CBM < PALLET_MIN_CBM -> drop Dailyfreight LCL pallet.
+      2. Else cart CBM < PALLET_MIN_CBM -> avoid an LCL pallet, BUT only when a
+         genuinely cheaper non-pallet option exists. A medium cart (~0.5-0.8m³) with
+         no courier option would otherwise be forced off the cheap pallet onto pricier
+         two-man — the opposite of "don't pay for a pallet on a small order". So we
+         only drop the pallet when the customer isn't worse off for it.
       3. Else -> all carriers eligible.
     FAIL-SAFE: if a filter would remove every quote (e.g. the forced carrier didn't
     quote this lane), keep the original set — a rate always beats no rate at checkout.
@@ -210,8 +214,12 @@ def _apply_service_rules(quotes: list, items: list, cart_cbm: float) -> list:
         twoman = [q for q in quotes if _is_twoman_quote(q)]
         return twoman or quotes
     if cart_cbm < PALLET_MIN_CBM:
+        pallet     = [q for q in quotes if _is_pallet_quote(q)]
         non_pallet = [q for q in quotes if not _is_pallet_quote(q)]
-        return non_pallet or quotes
+        if pallet and non_pallet and \
+           min(q["raw_cost"] for q in non_pallet) <= min(q["raw_cost"] for q in pallet):
+            return non_pallet  # a cheaper (or equal) non-pallet carrier exists -> skip the pallet
+        return quotes          # pallet is the cheapest sensible option -> keep it
     return quotes
 
 
@@ -810,16 +818,26 @@ async def calculate_auckland_freight(items: list, destination: dict) -> dict:
     Freight for a cart fulfilled from the Auckland 3PL warehouse — cheapest of the two
     ex-AKL carriers: Mainfreight M2H (NEDCOLAKL) and Dailyfreight LCL (NEDCOLDF, Māngere
     origin). Mirrors calculate_freight's return shape so the callback treats it identically.
-    Mainfreight is live via the Rating API; Dailyfreight uses NED's negotiated ex-AKL rate
-    card (formula) — the live API doesn't hold that card. customer_price is GST-inclusive.
+    Both are live via the Mainfreight Rating API. Under LIVE_ONLY the live DF quote is
+    authoritative; otherwise it falls back to NED's negotiated ex-AKL rate card (formula).
+    NED's service rules apply here too (Auckland holds the large/oversize items): an
+    oversize item forces Mainfreight M2H two-man. customer_price is GST-inclusive.
     """
+    import asyncio as _asyncio
     cart_cbm = _total_cbm(items)
-    m2h = await quote_mainfreight_akl_live(cart_cbm, destination)  # live Mainfreight M2H ex-AKL
-    df = quote_dailyfreight_akl(cart_cbm, destination)             # formula from negotiated ex-AKL card
+    m2h, df_live = await _asyncio.gather(
+        quote_mainfreight_akl_live(cart_cbm, destination),   # live Mainfreight M2H ex-AKL
+        quote_dailyfreight_akl_live(cart_cbm, destination),  # live Dailyfreight LCL ex-AKL
+    )
+    # DF: live authoritative under LIVE_ONLY, else fall back to the negotiated ex-AKL card
+    df = df_live if LIVE_ONLY else (df_live or quote_dailyfreight_akl(cart_cbm, destination))
     quotes = [q for q in (m2h, df) if q]
     if not quotes:
         return {"success": False, "error": "no_akl_rate", "cart_cbm": round(cart_cbm, 4)}
-    q = min(quotes, key=lambda x: x["raw_cost"])
+    # Same service rules as ex-CHCH (oversize -> two-man; small cart -> avoid pallet).
+    # Fail-safe: never empties a non-empty set.
+    eligible = _apply_service_rules(quotes, items, cart_cbm) if PALLET_RULE_ENABLED else quotes
+    q = min(eligible, key=lambda x: x["raw_cost"])
     return {
         "success":        True,
         "cart_cbm":       round(cart_cbm, 4),
@@ -911,10 +929,13 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     if debug:
         result["all_quotes"] = quotes  # full set considered
         result["eligible_quotes"] = eligible  # after service-rule filtering
-        result["rule_applied"] = (
-            "oversize->two_man" if (PALLET_RULE_ENABLED and _cart_has_oversize(items))
-            else "small_cart->no_pallet" if (PALLET_RULE_ENABLED and cart_cbm < PALLET_MIN_CBM)
-            else "none"
-        )
+        # Report the rule that actually changed the eligible set (not just what was tested)
+        if not PALLET_RULE_ENABLED or eligible is quotes:
+            rule = "none"
+        elif _cart_has_oversize(items):
+            rule = "oversize->two_man"
+        else:
+            rule = "small_cart->dropped_pallet"
+        result["rule_applied"] = rule
         result["destination"] = destination
     return result
