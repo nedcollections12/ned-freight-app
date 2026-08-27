@@ -826,6 +826,127 @@ def _shopify_headers():
     raise HTTPException(401, "No Shopify token configured")
 
 
+# ─── Product-page per-warehouse stock (Shopify App Proxy) ────────────────────
+# Powers the PDP stock display: TRADE customers see exact per-warehouse levels +
+# incoming; retail/anonymous see only a location badge (AKL / CHCH / AKL & CHCH),
+# never numbers. Trade-only numbers are gated SERVER-SIDE — the theme can't be
+# trusted — by verifying the Shopify app-proxy signature and checking the signed
+# logged_in_customer_id's tags. Read-only; inert until the theme calls it.
+TRADE_TAGS = {t.strip().lower() for t in os.environ.get("TRADE_TAGS", "wholesale").split(",") if t.strip()}
+
+
+def _verify_app_proxy_signature(request: Request) -> bool:
+    """Verify a Shopify App Proxy request signature (HMAC-SHA256 hex over the sorted
+    query params, excluding `signature`, using the app shared secret). Fail-closed."""
+    if not SHOPIFY_API_SECRET:
+        return False
+    params = dict(request.query_params)
+    sig = params.pop("signature", "")
+    if not sig:
+        return False
+    msg = "".join(f"{k}={v}" for k, v in sorted(params.items()))
+    digest = hmac.new(SHOPIFY_API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(digest, sig)
+
+
+async def _customer_is_trade(customer_id: str) -> bool:
+    """True if the logged-in customer carries a configured trade tag. Fail-safe: any
+    error / no customer -> False (treated as retail, so numbers are never leaked)."""
+    if not customer_id:
+        return False
+    try:
+        gql = f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json"
+        q = "query($id: ID!){ customer(id:$id){ tags } }"
+        gid = f"gid://shopify/Customer/{customer_id}"
+        async with httpx.AsyncClient(timeout=6.0) as c:
+            r = await c.post(gql, headers=_shopify_headers(), json={"query": q, "variables": {"id": gid}})
+        tags = ((r.json().get("data") or {}).get("customer") or {}).get("tags") or []
+        return bool({t.lower() for t in tags} & TRADE_TAGS)
+    except Exception:
+        logger.exception("customer trade-tag lookup failed for %s", customer_id)
+        return False
+
+
+def _stock_location_label(akl: int, chch: int) -> str:
+    """Retail-facing badge: where the stock is, no quantities."""
+    if akl > 0 and chch > 0:
+        return "AKL & CHCH"
+    if akl > 0:
+        return "AKL"
+    if chch > 0:
+        return "CHCH"
+    return "OUT"
+
+
+async def _product_stock_display(product_id: str, is_trade: bool) -> dict:
+    """Per-variant stock for the PDP. Trade -> exact AKL/CHCH available + incoming;
+    retail -> location label only. Reads live per-location availability + the
+    incoming_* metafields in one query."""
+    gql = f"https://{SHOPIFY_STORE}/admin/api/2024-10/graphql.json"
+    q = """
+    query($id: ID!) {
+      product(id: $id) {
+        variants(first: 100) { nodes {
+          legacyResourceId
+          title
+          inc:  metafield(namespace:"custom", key:"incoming_qty") { value }
+          incW: metafield(namespace:"custom", key:"incoming_warehouse") { value }
+          eta:  metafield(namespace:"custom", key:"arrival_date") { value }
+          inventoryItem { inventoryLevels(first: 20) { nodes {
+            location { id }
+            quantities(names: ["available"]) { name quantity }
+          }}}
+        }}
+      }
+    }
+    """
+    gid = f"gid://shopify/Product/{product_id}"
+    async with httpx.AsyncClient(timeout=8.0) as c:
+        r = await c.post(gql, headers=_shopify_headers(), json={"query": q, "variables": {"id": gid}})
+    nodes = (((r.json().get("data") or {}).get("product") or {}).get("variants") or {}).get("nodes") or []
+    out = []
+    for v in nodes:
+        akl = chch = 0
+        for lvl in (v.get("inventoryItem") or {}).get("inventoryLevels", {}).get("nodes", []):
+            qty = next((x["quantity"] for x in (lvl.get("quantities") or []) if x["name"] == "available"), 0)
+            loc = lvl.get("location", {}).get("id", "")
+            if loc == AKL_LOCATION_ID:
+                akl = qty
+            elif loc == CHCH_LOCATION_ID:
+                chch = qty
+        rec = {"variant_id": str(v.get("legacyResourceId") or ""),
+               "location": _stock_location_label(akl, chch)}
+        if is_trade:
+            rec["akl"] = akl
+            rec["chch"] = chch
+            inc = (v.get("inc") or {}).get("value")
+            if inc:
+                rec["incoming"] = int(inc)
+                rec["incoming_warehouse"] = (v.get("incW") or {}).get("value") or ""
+                rec["arrival_date"] = (v.get("eta") or {}).get("value") or ""
+        out.append(rec)
+    return {"trade": is_trade, "variants": out}
+
+
+@app.get("/api/product-stock")
+async def product_stock(request: Request, product_id: str = ""):
+    """App-proxy endpoint for the PDP stock display. Trade customers (verified via
+    the signed logged_in_customer_id) get exact per-warehouse levels; everyone else
+    gets a location badge only. Fail-safe: on any doubt, retail view (no numbers)."""
+    if not _verify_app_proxy_signature(request):
+        raise HTTPException(403, "Invalid app proxy signature")
+    if not product_id:
+        raise HTTPException(400, "product_id required")
+    customer_id = request.query_params.get("logged_in_customer_id", "")
+    is_trade = await _customer_is_trade(customer_id)
+    try:
+        return await _product_stock_display(product_id, is_trade)
+    except Exception as e:
+        logger.exception("product-stock failed for %s", product_id)
+        # Never break the PDP — return an empty retail-shaped payload.
+        return {"trade": False, "variants": [], "error": f"{type(e).__name__}"}
+
+
 @app.get("/api/cbm-list")
 async def cbm_list():
     """List every active variant with current weight (= CBM in kg-equivalent)."""
