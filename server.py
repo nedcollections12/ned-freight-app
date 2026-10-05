@@ -233,20 +233,11 @@ async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
     # Live carrier quote (debug=True so the rate log captures the full carrier breakdown)
     result = await live_rates.calculate_freight(items, destination, debug=True)
 
-    rates_out = []
-
-    # "PICK UP - Wigram Warehouse" as a $0 CARRIER rate for Canterbury all-CHCH carts.
-    # Restored 2026-08-28: native Local Pickup doesn't surface reliably for B2B
-    # checkouts (it collapsed B2B to pickup-only, dropping ship), so pickup stays a
-    # carrier rate that sits alongside Standard Delivery for everyone.
-    if _is_canterbury(destination) and await _all_at_chch(items):
-        rates_out.append({
-            "service_name": "PICK UP - Wigram Warehouse",
-            "service_code": "PICKUP",
-            "total_price":  "0",
-            "currency":     currency,
-            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
-        })
+    # Whole-cart pickup — one per branch that physically holds the ENTIRE order, offered
+    # to any customer (max flexibility). Shared helper so the Auckland-routing flow can't
+    # strip it. Pickup stays a $0 carrier rate that sits alongside Standard Delivery
+    # (native Local Pickup collapsed B2B checkout to pickup-only — see 2026-08-28).
+    rates_out = list(await _branch_pickup_rates(items, currency))
 
     if not result.get("success"):
         # No carrier matched — only show pickup (if available) or "Contact us"
@@ -273,7 +264,7 @@ async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
         "service_code": "NED_LIVE",
         "total_price":  str(price_cents),
         "currency":     currency,
-        "description":  "3 to 5 business days. " + CONTACT_NOTE,
+        "description":  "Ships from Christchurch — 3 to 5 business days. " + CONTACT_NOTE,
     })
     # B2B exclusive rate — only emitted once DUAL_RATES=1 (i.e. after Delivery Customization
     # Function is active and hiding this from retail customers)
@@ -284,7 +275,7 @@ async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
             "service_code": "NED_LIVE_B2B",
             "total_price":  str(excl_cents),
             "currency":     currency,
-            "description":  "3 to 5 business days. " + CONTACT_NOTE,
+            "description":  "Ships from Christchurch — 3 to 5 business days. " + CONTACT_NOTE,
         })
     return {"rates": rates_out}
 
@@ -425,6 +416,57 @@ def _akl_rate(name: str, code: str, price_cents: int, currency: str, desc: str) 
             "currency": currency, "description": desc}
 
 
+async def _branch_pickup_rates(items: list, currency: str) -> list:
+    """
+    $0 pickup options for EVERY branch that physically holds the WHOLE cart
+    (on_hand >= qty for every line). Location-independent by design — any customer may
+    collect from whichever branch has their full order (max flexibility). A dual-stocked
+    cart therefore offers BOTH Wigram and Māngere pickup.
+
+    The golden rule that keeps pickup unambiguous: a branch's pickup is offered ONLY when
+    that branch holds the ENTIRE order, so "pickup" always means the whole order, never
+    "some of it". Partial (collect-some / ship-the-rest) options for split carts live in
+    _auckland_routing — this helper never emits a partial.
+
+    This is the single source of truth for whole-cart pickup, shared by the normal flow,
+    the B2B flow and the Auckland-routing flow, so routing can never again strip the
+    Christchurch collect option off a dual-stocked cart (the reported bug).
+
+    Fail-safe: if stock can't be read (API hiccup / no variant_ids), fall back to offering
+    Wigram — today's default collect option — so a transient read error never silently
+    removes pickup.
+    """
+    WIGRAM = {"service_name": "PICK UP - Wigram (Christchurch)", "service_code": "PICKUP",
+              "total_price": "0", "currency": currency,
+              "description": "Collect your full order from 7 Paradyne Place, Wigram, "
+                             "Christchurch. We'll email you when it's ready to collect."}
+    MANGERE = {"service_name": "PICK UP - Māngere (Auckland)", "service_code": "PICKUP_AKL",
+               "total_price": "0", "currency": currency,
+               "description": "Collect your full order from 86 Ascot Road, Māngere, "
+                              "Auckland. We'll email you when it's ready to collect."}
+    try:
+        variant_ids = [str(i.get("variant_id")) for i in items if i.get("variant_id")]
+        stock = await get_location_stock(variant_ids) if variant_ids else {}
+    except Exception:
+        stock = {}
+    if not stock:
+        return [WIGRAM]  # fail-open to the default collect option; never strip pickup on a read error
+
+    def branch_has_all(oh_key: str) -> bool:
+        for i in items:
+            s = stock.get(str(i.get("variant_id")))
+            if s is None or s.get(oh_key, 0) < int(i.get("quantity", 1)):
+                return False
+        return True
+
+    out = []
+    if branch_has_all("chch_oh"):
+        out.append(WIGRAM)
+    if branch_has_all("akl_oh"):
+        out.append(MANGERE)
+    return out
+
+
 def _std_rate(price_incl: float, gst_divisor: float, currency: str, desc: str) -> dict:
     """A real, priced 'Standard Delivery' line (gst_divisor divides for the B2B endpoint)."""
     cents = int(float(math.ceil(price_incl / gst_divisor)) * 100)
@@ -557,30 +599,35 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
             note = "3 to 5 business days."
         rates = [_std_rate(total, gst_divisor, currency, f"{note} {CONTACT_NOTE}")]
 
-        # Pickup as a $0 carrier rate (restored 2026-08-28 — native Local Pickup
-        # collapsed B2B checkout to pickup-only). Full Auckland pickup when the whole
-        # cart is collectable there; else the PARTIAL collect (native can't split a cart).
-        if is_ni and d["collectable"]:
-            if not d["chch_only"]:
-                rates.append(_akl_rate(
-                    "PICK UP - Auckland Warehouse", "PICKUP_AKL", 0, currency,
-                    "Collect from our Auckland warehouse, 86 Ascot Road, Māngere. "
-                    "We'll email you when it's ready."))
-            elif d["chch_only_price"] is not None:
-                cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
-                rates.append(_akl_rate(
-                    "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
-                    "Collect Auckland-stocked items from Māngere; the rest ships from Christchurch."))
+        # Whole-cart pickup for ANY branch that physically holds the ENTIRE order
+        # (location-independent, max flexibility). Shared helper — this is what restores
+        # the Christchurch collect option on dual-stocked carts the routing path used to
+        # drop (the reported bug). Dedup by service_code against the partial lines below.
+        for p in await _branch_pickup_rates(items, currency):
+            rates.append(p)
+        have = {r["service_code"] for r in rates}
 
-        # Canterbury customer with an Auckland-only item in a mixed cart: let them collect
-        # the Christchurch-held items from Wigram and ship only the Auckland-only items.
+        # PARTIAL collect for SPLIT carts only (no single branch holds everything): collect
+        # the locally-held part free, ship the rest. Skipped if a whole-cart pickup for that
+        # branch is already offered above, so the two never both appear for one branch.
+        # A $0 carrier rate (native Local Pickup collapsed B2B checkout to pickup-only, 2026-08-28).
+        if is_ni and d["collectable"] and d["chch_only"] and d["chch_only_price"] is not None \
+                and "PICKUP_AKL" not in have:
+            cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
+            rates.append(_akl_rate(
+                "Collect Auckland items + ship the rest", "NED_MIXED_COLLECT", cents, currency,
+                "Your order is split across branches: collect the Auckland-stocked items free "
+                "from Māngere; the remaining items ship from Christchurch at this price."))
+
+        # Canterbury customer with an Auckland-only item in a split cart: collect the
+        # Christchurch-held items from Wigram, ship only the Auckland-only items.
         elif _is_canterbury(destination) and d["must_akl"] and (d["chch_only"] or d["dual"]) \
-                and d.get("must_akl_price") is not None:
+                and d.get("must_akl_price") is not None and "PICKUP" not in have:
             cents = int(float(math.ceil(d["must_akl_price"] / gst_divisor)) * 100)
             rates.append(_akl_rate(
                 "Collect Christchurch items + ship Auckland", "WIGRAM_MIXED_COLLECT", cents, currency,
-                "Collect the Christchurch-stocked items from our Wigram warehouse; "
-                "the Auckland items ship from Auckland."))
+                "Your order is split across branches: collect the Christchurch-stocked items "
+                "free from Wigram; the Auckland items ship to you at this price."))
 
         try:
             skus = lambda grp: [i.get("sku") or str(i.get("variant_id")) for i in grp]
@@ -686,18 +733,10 @@ async def shopify_rates_b2b(request: Request):
 
     result = await live_rates.calculate_freight(items, destination, debug=True)
 
-    rates_out = []
-
-    # "PICK UP - Wigram Warehouse" $0 carrier rate for Canterbury all-CHCH B2B carts
-    # (restored 2026-08-28 — native Local Pickup collapsed B2B checkout to pickup-only).
-    if _is_canterbury(destination) and await _all_at_chch(items):
-        rates_out.append({
-            "service_name": "PICK UP - Wigram Warehouse",
-            "service_code": "PICKUP",
-            "total_price":  "0",
-            "currency":     currency,
-            "description":  "Collect from 7 Paradyne Place, Wigram. Please arrange a time before collection."
-        })
+    # Whole-cart pickup — one per branch holding the ENTIRE order, any customer (shared
+    # helper, same as the retail flow). $0 carrier rate (native Local Pickup collapsed
+    # B2B checkout to pickup-only, 2026-08-28).
+    rates_out = list(await _branch_pickup_rates(items, currency))
 
     if not result.get("success"):
         rate_log.log_rate(destination=destination, items=items, result=result,
@@ -723,7 +762,7 @@ async def shopify_rates_b2b(request: Request):
         "service_code": "NED_LIVE_B2B",
         "total_price":  str(price_cents),
         "currency":     currency,
-        "description":  "3 to 5 business days. " + CONTACT_NOTE,
+        "description":  "Ships from Christchurch — 3 to 5 business days. " + CONTACT_NOTE,
     })
     return {"rates": rates_out}
 

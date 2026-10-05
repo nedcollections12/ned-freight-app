@@ -33,10 +33,17 @@ lr._oversize_ids_cache = {"111"}
 r = asyncio.run(run(OVER, live_only=False, pallet_rule=True))
 check("oversize ex-AKL -> two-man (not cheaper DF pallet)", r["chosen_carrier"], "Mainfreight")
 
-# Normal cart -> cheapest wins (DF pallet 80 < MF 120)
+# Small cart (sub-pallet, 0 CBM) -> DF pallet dropped by the pallet-only rule even though
+# it's cheaper (80 < 120); customer correctly pays the two-man rate.
 lr._oversize_ids_cache = set()
 r = asyncio.run(run(NORMAL, live_only=False, pallet_rule=True))
-check("normal ex-AKL -> cheapest (Dailyfreight)", r["chosen_carrier"], "Dailyfreight")
+check("normal small ex-AKL -> DF dropped (pallet-only rule) -> Mainfreight",
+      r["chosen_carrier"], "Mainfreight")
+
+# Genuine pallet cart (>=0.8 m³) -> DF pallet is legitimate and cheapest -> DF wins.
+PALLET = [{"product_id": 222, "quantity": 1, "grams": 1000}]  # 1.0 m³ (grams/1000 = CBM)
+r = asyncio.run(run(PALLET, live_only=False, pallet_rule=True))
+check("pallet ex-AKL (>=0.8m³) -> cheapest DF wins", r["chosen_carrier"], "Dailyfreight")
 
 # LIVE_ONLY on, live DF present -> uses live DF (service 'LCL Palletised', not the '(ex-Auckland)' formula)
 r = asyncio.run(run(NORMAL, live_only=True, pallet_rule=False))

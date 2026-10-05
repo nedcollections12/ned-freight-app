@@ -122,8 +122,10 @@ def reload_carrier_rates():
 LIVE_ONLY = os.environ.get("LIVE_ONLY", "0") == "1"
 
 # PALLET_RULE_ENABLED: apply NED's service rules (oversize -> Two-Man; small cart
-# -> no LCL pallet). Off = today's pure cheapest-wins behaviour.
-PALLET_RULE_ENABLED = os.environ.get("PALLET_RULE_ENABLED", "0") == "1"
+# -> no LCL pallet). Now ON by default — leaving it off is the Dailyfreight undercharge
+# (DF pallet rate winning non-pallet carts). Set the env var to "0" only to temporarily
+# revert to pure cheapest-wins.
+PALLET_RULE_ENABLED = os.environ.get("PALLET_RULE_ENABLED", "1") == "1"
 
 # Below this cart CBM we don't put an order on an LCL pallet by itself — drop
 # Dailyfreight so a courier / Mainfreight Two-Man wins instead.
@@ -199,14 +201,15 @@ def _apply_service_rules(quotes: list, items: list, cart_cbm: float) -> list:
     """
     Filter carrier quotes by NED's service rules before cheapest-wins selection:
       1. Any item >1.5m (oversize list) -> force Mainfreight M2H two-man.
-      2. Else cart CBM < PALLET_MIN_CBM -> avoid an LCL pallet, BUT only when a
-         genuinely cheaper non-pallet option exists. A medium cart (~0.5-0.8m³) with
-         no courier option would otherwise be forced off the cheap pallet onto pricier
-         two-man — the opposite of "don't pay for a pallet on a small order". So we
-         only drop the pallet when the customer isn't worse off for it.
-      3. Else -> all carriers eligible.
-    FAIL-SAFE: if a filter would remove every quote (e.g. the forced carrier didn't
-    quote this lane), keep the original set — a rate always beats no rate at checkout.
+      2. Else cart CBM < PALLET_MIN_CBM -> this order is NOT a pallet load, so the
+         Dailyfreight LCL (pallet) rate must not be used: drop it so a courier (CP) or
+         Mainfreight two-man wins instead. This DELIBERATELY charges the real non-pallet
+         rate even when the pallet quote was cheaper — the LCL pallet price only holds for
+         a genuinely palletised consignment, and applying it to small orders is the
+         undercharge this rule exists to stop (DF was winning ~52% of sub-0.8m³ carts).
+      3. Else (cart CBM >= PALLET_MIN_CBM) -> pallet is legitimate; all carriers eligible.
+    FAIL-SAFE: a filter never empties a non-empty set — if DF was the ONLY carrier that
+    quoted this lane, keep it (a rate always beats no rate at checkout).
     """
     if not quotes:
         return quotes
@@ -214,12 +217,11 @@ def _apply_service_rules(quotes: list, items: list, cart_cbm: float) -> list:
         twoman = [q for q in quotes if _is_twoman_quote(q)]
         return twoman or quotes
     if cart_cbm < PALLET_MIN_CBM:
-        pallet     = [q for q in quotes if _is_pallet_quote(q)]
+        # Below the pallet floor: exclude Dailyfreight (LCL pallet) outright. Pricier
+        # non-pallet is the CORRECT charge for a non-pallet order; only fall back to the
+        # full set (DF included) if dropping it would leave no rate at all.
         non_pallet = [q for q in quotes if not _is_pallet_quote(q)]
-        if pallet and non_pallet and \
-           min(q["raw_cost"] for q in non_pallet) <= min(q["raw_cost"] for q in pallet):
-            return non_pallet  # a cheaper (or equal) non-pallet carrier exists -> skip the pallet
-        return quotes          # pallet is the cheapest sensible option -> keep it
+        return non_pallet or quotes
     return quotes
 
 

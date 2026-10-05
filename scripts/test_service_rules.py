@@ -43,11 +43,12 @@ check("cheaper courier -> DF dropped",
       carriers(lr._apply_service_rules([CP, MF, DF], NORMAL, 0.3)),
       ["Mainfreight", "Post Haste - Freight Forwards"])
 
-print("Rule 2 refined — small MEDIUM cart, pallet CHEAPEST (no courier) -> KEEP pallet (no perverse +$)")
-# only DF(60) + MF(90) two-man; pallet is cheapest -> must NOT force two-man
-check("pallet cheapest -> kept (not forced to two-man)",
+print("Rule 2 — small MEDIUM cart, pallet CHEAPEST but still < floor -> DROP pallet (pallet-only rule)")
+# only DF(60) + MF(90); DF is cheaper BUT cart is non-pallet (<0.8) -> DF must be dropped,
+# customer correctly pays the two-man rate (this is the undercharge fix, by design).
+check("pallet cheapest but sub-floor -> DF dropped, two-man kept",
       carriers(lr._apply_service_rules([MF, DF], NORMAL, 0.68)),
-      ["Dailyfreight", "Mainfreight"])
+      ["Mainfreight"])
 
 print("Rule 2 fail-safe — small cart but ONLY DF quoted -> keep DF (never block)")
 check("only DF -> kept",
