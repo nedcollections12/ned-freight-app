@@ -882,23 +882,29 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     if df:
         quotes.append(df)
 
-    # Postcode/province fallback: if neither formula carrier matched the city
-    # name (e.g. Google put a suburb in the city field), resolve by postcode
-    # then region so we never drop to no_carrier_match for a real NZ address.
-    # Only triggers when both MF and DF missed. Formula-based, so skipped under
-    # LIVE_ONLY (live quotes key off postcode+city directly and don't need it).
-    if not mf and not df and not LIVE_ONLY:
+    # Postcode/province fallback: if the carriers couldn't price the city (a typo like
+    # "Roturua", a suburb like "Karori", or an amalgamated council name), resolve the
+    # destination by postcode then region and quote off the rate card, so we never drop a
+    # ratable NZ address to $0 "Contact Us" (NED3823: "Roturua" 3010 quoted nothing and
+    # shipped free). The postcode is unchanged so the rate stays accurate, and it's
+    # formula-based (instant — no extra network round, no Shopify ~10s-timeout risk).
+    #
+    #   * Not LIVE_ONLY: fires whenever both MF and DF missed (original behaviour).
+    #   * LIVE_ONLY: live carriers stay authoritative — this fires ONLY when nothing
+    #     quoted at all, as a last-resort rescue in place of no_carrier_match.
+    need_fallback = (not quotes) if LIVE_ONLY else (not mf and not df)
+    if need_fallback:
         fb = _fallback_keys(destination)
         if fb:
             mf_key, df_key = fb
-            mf = quote_mainfreight(cart_cbm, destination, override_key=mf_key)
-            if mf:
-                mf["_source"] += "  [postcode/province fallback]"
-                quotes.append(mf)
-            df = quote_dailyfreight(cart_cbm, destination, override_key=df_key)
-            if df:
-                df["_source"] += "  [postcode/province fallback]"
-                quotes.append(df)
+            mf_fb = quote_mainfreight(cart_cbm, destination, override_key=mf_key)
+            if mf_fb:
+                mf_fb["_source"] += "  [postcode/province fallback]"
+                quotes.append(mf_fb)
+            df_fb = quote_dailyfreight(cart_cbm, destination, override_key=df_key)
+            if df_fb:
+                df_fb["_source"] += "  [postcode/province fallback]"
+                quotes.append(df_fb)
 
     if not quotes:
         return {
