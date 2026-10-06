@@ -667,6 +667,27 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
                 "Your order is split across branches: collect the Christchurch-stocked items "
                 "free from Wigram; the Auckland items ship to you at this price."))
 
+        # GST twins for trade. B2B markets are ADD_TAXES_AT_CHECKOUT, so Shopify re-adds 15%
+        # — every taxable rate must therefore be offered ex-GST too, or trade either loses the
+        # rate (the function hides the inclusive NED_LIVE) or is overcharged on it. Emit a
+        # *_B2B twin of each non-$0 rate at price ÷ GST; the Delivery Customization Function
+        # shows retail the inclusive codes and trade the _B2B twins. Mirrors the dual rate the
+        # non-AKL flow emits in _compute_rates. Only on the shared retail+B2B carrier service
+        # (gst_divisor == 1.0); pickups ($0) are identical ex-GST so need no twin.
+        if DUAL_RATES and gst_divisor == 1.0:
+            twins = []
+            for r in rates:
+                try:
+                    r_cents = int(r.get("total_price") or 0)
+                except (TypeError, ValueError):
+                    r_cents = 0
+                if r_cents <= 0:
+                    continue  # $0 pickup / free — same ex-GST, no twin
+                excl = int(round((r_cents / 100.0) / GST, 2) * 100)
+                twins.append({**r, "service_code": r["service_code"] + "_B2B",
+                              "total_price": str(excl)})
+            rates.extend(twins)
+
         try:
             skus = lambda grp: [i.get("sku") or str(i.get("variant_id")) for i in grp]
             rate_log.log_rate(
