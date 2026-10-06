@@ -237,7 +237,7 @@ async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
     # to any customer (max flexibility). Shared helper so the Auckland-routing flow can't
     # strip it. Pickup stays a $0 carrier rate that sits alongside Standard Delivery
     # (native Local Pickup collapsed B2B checkout to pickup-only — see 2026-08-28).
-    rates_out = list(await _branch_pickup_rates(items, currency))
+    rates_out = list(await _branch_pickup_rates(items, currency, destination))
 
     if not result.get("success"):
         # No carrier matched — only show pickup (if available) or "Contact us"
@@ -323,6 +323,37 @@ def _is_north_island(destination: dict) -> bool:
     try:
         # NI postcodes are 0110–6999; South Island is 7000–9999.
         if 100 <= int(pc[:4]) <= 6999:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
+_AKL_PROVINCES = {"AUK", "AUCKLAND"}
+
+
+def _is_auckland(destination: dict) -> bool:
+    """Detect if a destination is in the Auckland region (eligible to collect from the
+    Māngere / Auckland warehouse). Mirrors _is_canterbury: province first, then city,
+    then an Auckland-metro postcode range."""
+    province = (destination.get("province") or "").upper().strip()
+    if province in _AKL_PROVINCES:
+        return True
+    city = (destination.get("city") or "").lower().strip()
+    auckland_cities = {
+        "auckland", "manukau", "māngere", "mangere", "albany", "henderson",
+        "takapuna", "manurewa", "papakura", "pukekohe", "waiuku", "botany",
+        "howick", "north shore", "waitakere", "new lynn", "onehunga", "penrose",
+        "east tamaki", "papatoetoe", "otahuhu", "glenfield", "birkenhead",
+        "orewa", "silverdale", "helensville", "warkworth", "beachlands", "clevedon",
+    }
+    if city in auckland_cities:
+        return True
+    pc = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    try:
+        # Auckland-region postcodes span ~0600–2699 (Rodney/Hibiscus Coast through
+        # Pukekohe); below 0600 is Northland, above is Waikato.
+        if 600 <= int(pc[:4]) <= 2699:
             return True
     except (ValueError, TypeError):
         pass
@@ -416,25 +447,22 @@ def _akl_rate(name: str, code: str, price_cents: int, currency: str, desc: str) 
             "currency": currency, "description": desc}
 
 
-async def _branch_pickup_rates(items: list, currency: str) -> list:
+async def _branch_pickup_rates(items: list, currency: str, destination: dict) -> list:
     """
-    $0 pickup options for EVERY branch that physically holds the WHOLE cart
-    (on_hand >= qty for every line). Location-independent by design — any customer may
-    collect from whichever branch has their full order (max flexibility). A dual-stocked
-    cart therefore offers BOTH Wigram and Māngere pickup.
+    $0 WHOLE-CART pickup, GEO-GATED (2026-10-06): a branch's pickup is offered only when
+    BOTH (a) the delivery address is in that branch's region, and (b) that branch
+    physically holds the ENTIRE cart (on_hand >= qty for every line):
+      • Wigram (Christchurch) → Canterbury customers
+      • Māngere (Auckland)    → Auckland customers
+    Customers outside both regions see no pickup (ship only). "Pickup" always means the
+    whole order from the customer's LOCAL branch; partial collect-some/ship-the-rest for
+    split carts lives in _auckland_routing — this helper never emits a partial.
 
-    The golden rule that keeps pickup unambiguous: a branch's pickup is offered ONLY when
-    that branch holds the ENTIRE order, so "pickup" always means the whole order, never
-    "some of it". Partial (collect-some / ship-the-rest) options for split carts live in
-    _auckland_routing — this helper never emits a partial.
-
-    This is the single source of truth for whole-cart pickup, shared by the normal flow,
-    the B2B flow and the Auckland-routing flow, so routing can never again strip the
-    Christchurch collect option off a dual-stocked cart (the reported bug).
+    Shared by the normal flow, the B2B flow and the Auckland-routing flow.
 
     Fail-safe: if stock can't be read (API hiccup / no variant_ids), fall back to offering
-    Wigram — today's default collect option — so a transient read error never silently
-    removes pickup.
+    the customer's LOCAL branch only, so a transient read error never offers an
+    out-of-region pickup and never silently removes a relevant one.
     """
     WIGRAM = {"service_name": "PICK UP - Wigram (Christchurch)", "service_code": "PICKUP",
               "total_price": "0", "currency": currency,
@@ -444,13 +472,24 @@ async def _branch_pickup_rates(items: list, currency: str) -> list:
                "total_price": "0", "currency": currency,
                "description": "Collect your full order from 86 Ascot Road, Māngere, "
                               "Auckland. We'll email you when it's ready to collect."}
+    in_chch = _is_canterbury(destination)
+    in_akl = _is_auckland(destination)
+    if not in_chch and not in_akl:
+        return []  # not local to either branch -> ship only
+
     try:
         variant_ids = [str(i.get("variant_id")) for i in items if i.get("variant_id")]
         stock = await get_location_stock(variant_ids) if variant_ids else {}
     except Exception:
         stock = {}
     if not stock:
-        return [WIGRAM]  # fail-open to the default collect option; never strip pickup on a read error
+        # Read error: fall open to the customer's local branch only (never out-of-region).
+        out = []
+        if in_chch:
+            out.append(WIGRAM)
+        if in_akl:
+            out.append(MANGERE)
+        return out
 
     def branch_has_all(oh_key: str) -> bool:
         for i in items:
@@ -460,9 +499,9 @@ async def _branch_pickup_rates(items: list, currency: str) -> list:
         return True
 
     out = []
-    if branch_has_all("chch_oh"):
+    if in_chch and branch_has_all("chch_oh"):
         out.append(WIGRAM)
-    if branch_has_all("akl_oh"):
+    if in_akl and branch_has_all("akl_oh"):
         out.append(MANGERE)
     return out
 
@@ -588,7 +627,6 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         akl_grp, chch_grp = d["akl_items"], d["chch_items"]
         akl_price, chch_price = d["akl_price"], d["chch_price"]
         total = akl_price + chch_price
-        is_ni = _is_north_island(destination)
 
         if akl_grp and chch_grp:
             note = ("Ships from two warehouses (Auckland + Christchurch) as 2 parcels — "
@@ -603,7 +641,7 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         # (location-independent, max flexibility). Shared helper — this is what restores
         # the Christchurch collect option on dual-stocked carts the routing path used to
         # drop (the reported bug). Dedup by service_code against the partial lines below.
-        for p in await _branch_pickup_rates(items, currency):
+        for p in await _branch_pickup_rates(items, currency, destination):
             rates.append(p)
         have = {r["service_code"] for r in rates}
 
@@ -611,7 +649,7 @@ async def _auckland_routing(destination: dict, items: list, currency: str,
         # the locally-held part free, ship the rest. Skipped if a whole-cart pickup for that
         # branch is already offered above, so the two never both appear for one branch.
         # A $0 carrier rate (native Local Pickup collapsed B2B checkout to pickup-only, 2026-08-28).
-        if is_ni and d["collectable"] and d["chch_only"] and d["chch_only_price"] is not None \
+        if _is_auckland(destination) and d["collectable"] and d["chch_only"] and d["chch_only_price"] is not None \
                 and "PICKUP_AKL" not in have:
             cents = int(float(math.ceil(d["chch_only_price"] / gst_divisor)) * 100)
             rates.append(_akl_rate(
@@ -736,7 +774,7 @@ async def shopify_rates_b2b(request: Request):
     # Whole-cart pickup — one per branch holding the ENTIRE order, any customer (shared
     # helper, same as the retail flow). $0 carrier rate (native Local Pickup collapsed
     # B2B checkout to pickup-only, 2026-08-28).
-    rates_out = list(await _branch_pickup_rates(items, currency))
+    rates_out = list(await _branch_pickup_rates(items, currency, destination))
 
     if not result.get("success"):
         rate_log.log_rate(destination=destination, items=items, result=result,
