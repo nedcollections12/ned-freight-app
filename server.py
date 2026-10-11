@@ -491,17 +491,29 @@ async def _branch_pickup_rates(items: list, currency: str, destination: dict) ->
             out.append(MANGERE)
         return out
 
-    def branch_has_all(oh_key: str) -> bool:
+    def branch_has_all(oh_key: str, other_oh_key: str) -> bool:
+        # A branch's pickup is offered when, for EVERY line, the branch either physically
+        # holds it now OR neither branch can fulfil it yet — a pre-order / coming-soon line
+        # (zero on-hand everywhere) that will be fulfilled to the customer's LOCAL branch
+        # when stock lands, so collect is valid (the option's copy already says "we'll email
+        # you when it's ready to collect"). Only a line the OTHER branch can ship in full is a
+        # genuine out-of-region item and blocks local pickup. Fail-safe: unknown variant -> block.
         for i in items:
             s = stock.get(str(i.get("variant_id")))
-            if s is None or s.get(oh_key, 0) < int(i.get("quantity", 1)):
+            if s is None:
                 return False
+            q = int(i.get("quantity", 1))
+            if s.get(oh_key, 0) >= q:
+                continue  # local branch physically holds this line
+            if s.get(other_oh_key, 0) >= q:
+                return False  # other branch holds it in full -> out-of-region, not collectable here
+            # else: neither branch holds it -> pre-order/incoming -> collectable from local branch
         return True
 
     out = []
-    if in_chch and branch_has_all("chch_oh"):
+    if in_chch and branch_has_all("chch_oh", "akl_oh"):
         out.append(WIGRAM)
-    if in_akl and branch_has_all("akl_oh"):
+    if in_akl and branch_has_all("akl_oh", "chch_oh"):
         out.append(MANGERE)
     return out
 

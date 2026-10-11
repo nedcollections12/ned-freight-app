@@ -59,6 +59,37 @@ check("dual stock + Canterbury -> Wigram only", pickup(CAN), ["PICKUP"])
 check("dual stock + Auckland -> Māngere only", pickup(AKL), ["PICKUP_AKL"])
 check("dual stock + Wellington -> no pickup", pickup(WGN), [])
 
+# --- pre-order / coming-soon: zero on-hand everywhere still collects from LOCAL branch ---
+# (NED3884 bug: a Canterbury customer ordering a pre-order sofa was offered no collect.)
+PREORDER  = {"akl": 0, "akl_oh": 0, "chch": 0, "chch_oh": 0}      # nothing physical anywhere
+BACKORDER = {"akl": 0, "akl_oh": 0, "chch": -3, "chch_oh": 0}     # sold past zero, still 0 on-hand
+
+stub_stock(PREORDER)
+check("pre-order + Canterbury -> Wigram pickup", pickup(CAN), ["PICKUP"])
+check("pre-order + Auckland -> Māngere pickup", pickup(AKL), ["PICKUP_AKL"])
+check("pre-order + Wellington -> no pickup (still geo-gated)", pickup(WGN), [])
+
+stub_stock(BACKORDER)
+check("backorder (neg available, 0 on-hand) + Canterbury -> Wigram pickup", pickup(CAN), ["PICKUP"])
+
+# Exact NED3884 shape: Nord Sofa - Sand, CHCH on_hand -2 (sold past zero), AKL on_hand 0.
+NED3884 = {"akl": 0, "akl_oh": 0, "chch": -6, "chch_oh": -2}
+stub_stock(NED3884)
+check("NED3884 (neg on-hand both branches) + Canterbury -> Wigram pickup", pickup(CAN), ["PICKUP"])
+
+# mixed cart: a pre-order line + an AKL-only in-stock line. The AKL-only line is genuinely
+# out-of-region for Canterbury, so Wigram collect must stay suppressed (not a pure pre-order).
+def stub_multi(recs):
+    async def fake(variant_ids):
+        return recs
+    server.get_location_stock = fake
+MIXED_ITEMS = [{"variant_id": 1, "quantity": 1}, {"variant_id": 2, "quantity": 1}]
+stub_multi({"1": PREORDER, "2": AKL_ONLY})
+check("pre-order + AKL-only line + Canterbury -> no Wigram (out-of-region line)",
+      codes(asyncio.run(server._branch_pickup_rates(MIXED_ITEMS, "NZD", CAN))), [])
+check("pre-order + AKL-only line + Auckland -> Māngere (AKL holds the preorder-when-landed)",
+      codes(asyncio.run(server._branch_pickup_rates(MIXED_ITEMS, "NZD", AKL))), ["PICKUP_AKL"])
+
 # --- fail-safe on stock read error: offer the customer's LOCAL branch only ---
 stub_stock(None)
 check("read error + Canterbury -> Wigram (fail-open local)", pickup(CAN), ["PICKUP"])
