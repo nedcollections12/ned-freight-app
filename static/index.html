@@ -120,6 +120,7 @@
   <button data-tab="tester">Test a quote</button>
   <button data-tab="carriers">Carrier rate cards</button>
   <button data-tab="oversize">Oversize / two-man</button>
+  <button data-tab="cartons">Cartons</button>
   <button data-tab="ratelog">Rate log</button>
   <button data-tab="docs">How it works</button>
 </nav>
@@ -261,6 +262,25 @@
     </div>
   </section>
 
+  <!-- TAB: Cartons -->
+  <section class="tab" id="tab-cartons">
+    <div class="card">
+      <h2>Carton map</h2>
+      <p class="hint">Give a product its real shipping cartons so the courier (Castle Parcels) can quote each
+        one — this fixes multi-piece items (e.g. the <strong>Nova</strong>) being forced onto the pricier
+        pallet / two-man rate. Enter each carton's size, or just a single CBM if it ships as one box.
+        Products not listed here keep the automatic estimate from their Shopify CBM.</p>
+      <div class="row" style="margin-bottom: 12px;">
+        <input type="search" id="carton-search" placeholder="Search a product to add / edit…">
+        <button class="btn btn-secondary" onclick="loadCartons(true)">Refresh</button>
+      </div>
+      <div id="carton-search-results"></div>
+      <div id="carton-editor" style="display:none;margin-top:12px;"></div>
+      <h3 style="margin:18px 0 6px;">Mapped products (<span id="carton-count">0</span>)</h3>
+      <div id="carton-current" class="loading">Loading…</div>
+    </div>
+  </section>
+
   <!-- TAB: Docs -->
   <section class="tab docs" id="tab-docs">
     <div class="card">
@@ -397,6 +417,7 @@ document.querySelectorAll('nav button').forEach(btn => {
     if (btn.dataset.tab === 'carriers' && !window._carriersLoaded) loadCarriers();
     if (btn.dataset.tab === 'ratelog') loadRateLog();
     if (btn.dataset.tab === 'oversize') loadOversize();
+    if (btn.dataset.tab === 'cartons') loadCartons();
   });
 });
 
@@ -489,6 +510,167 @@ async function removeOversize(productId) {
 document.addEventListener('DOMContentLoaded', () => {
   const os = document.getElementById('oversize-search');
   if (os) os.addEventListener('input', renderOversizeResults);
+});
+
+// ── Cartons tab ─────────────────────────────────────────────────────────────
+// Per-product real cartons so Castle Parcels can quote each one (fixes multi-piece
+// items being forced onto pallet/two-man). Keyed by product_id, reusing the CBM
+// variant list for product search. Editor supports multi-carton or single-CBM.
+let _cartonItems = [];     // current map entries from /api/cartons
+let _cartonDraft = null;   // the entry being edited
+
+async function loadCartons(refreshProducts) {
+  const cur = document.getElementById('carton-current');
+  try {
+    const r = await fetch('/api/cartons');
+    const data = await r.json();
+    _cartonItems = data.items || [];
+    document.getElementById('carton-count').textContent = _cartonItems.length;
+    cur.innerHTML = _cartonItems.length
+      ? '<table class="rate-table"><tbody>' + _cartonItems.map(e => {
+          const desc = (e.cartons && e.cartons.length)
+            ? e.cartons.map(_cartonLabel).join(' + ')
+            : (e.cbm != null ? ('single box · ' + e.cbm + ' m³') : '—');
+          return `<tr><td>${_esc(e.title) || '(untitled)'}<div class="hint">#${_esc(e.key)}</div></td>`
+            + `<td>${_esc(desc)}</td>`
+            + `<td style="text-align:right;white-space:nowrap">`
+            + `<button class="btn btn-secondary" onclick="openCartonEditor('${_esc(e.key)}')">Edit</button> `
+            + `<button class="btn btn-secondary" onclick="removeCarton('${_esc(e.key)}')">Remove</button></td></tr>`;
+        }).join('') + '</tbody></table>'
+      : '<p class="hint">No products mapped yet. Search above to add one.</p>';
+  } catch (e) {
+    cur.innerHTML = '<p class="hint">Could not load the carton map.</p>';
+  }
+  if (refreshProducts || allVariants.length === 0) {
+    try { await loadCbm(refreshProducts); } catch (e) {}
+  }
+}
+
+function _cartonLabel(c) {
+  if (c.length_cm && c.width_cm && c.height_cm) {
+    const cbm = (c.length_cm * c.width_cm * c.height_cm / 1e6).toFixed(3);
+    return `${c.length_cm}×${c.width_cm}×${c.height_cm}cm (${cbm} m³)`;
+  }
+  if (c.cbm != null) return `${c.cbm} m³`;
+  return '?';
+}
+
+function renderCartonSearch() {
+  const q = document.getElementById('carton-search').value;
+  const box = document.getElementById('carton-search-results');
+  if (!q.trim()) { box.innerHTML = ''; return; }
+  const rows = _uniqueProducts(q);
+  box.innerHTML = rows.length
+    ? '<table class="rate-table"><tbody>' + rows.map(p =>
+        `<tr><td>${_esc(p.title)}</td><td class="hint">#${_esc(p.product_id)}</td>`
+        + `<td style="text-align:right"><button class="btn btn-primary" onclick="openCartonEditor('${_esc(p.product_id)}')">Edit cartons</button></td></tr>`
+      ).join('') + '</tbody></table>'
+    : '<p class="hint">No matching products.</p>';
+}
+
+function openCartonEditor(key) {
+  const existing = _cartonItems.find(e => String(e.key) === String(key));
+  const match = allVariants.find(v => String(v.product_id) === String(key));
+  const title = (existing && existing.title) || (match ? match.product : '');
+  const mode = (existing && existing.cartons && existing.cartons.length) ? 'cartons'
+             : (existing && existing.cbm != null) ? 'cbm' : 'cartons';
+  _cartonDraft = {
+    key: String(key),
+    title,
+    mode,
+    cartons: (existing && existing.cartons) ? existing.cartons.map(c => Object.assign({}, c)) : [{}],
+    cbm: (existing && existing.cbm != null) ? existing.cbm : (match ? match.cbm : ''),
+  };
+  renderCartonEditor();
+  document.getElementById('carton-editor').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function renderCartonEditor() {
+  const d = _cartonDraft;
+  const box = document.getElementById('carton-editor');
+  if (!d) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  const rows = (d.cartons.length ? d.cartons : [{}]).map((c, i) =>
+    `<tr>
+      <td><input type="number" step="0.1" min="0" value="${c.length_cm ?? ''}" oninput="cartonField(${i},'length_cm',this.value)" style="width:72px"></td>
+      <td><input type="number" step="0.1" min="0" value="${c.width_cm ?? ''}" oninput="cartonField(${i},'width_cm',this.value)" style="width:72px"></td>
+      <td><input type="number" step="0.1" min="0" value="${c.height_cm ?? ''}" oninput="cartonField(${i},'height_cm',this.value)" style="width:72px"></td>
+      <td><input type="number" step="0.1" min="0" value="${c.kg ?? ''}" oninput="cartonField(${i},'kg',this.value)" style="width:72px" placeholder="opt"></td>
+      <td><button class="btn btn-secondary" onclick="removeCartonRow(${i})">✕</button></td>
+    </tr>`).join('');
+  box.innerHTML = `
+    <div class="card" style="background:#fafafa">
+      <b>${_esc(d.title) || _esc(d.key)}</b> <span class="hint">#${_esc(d.key)}</span>
+      <div style="margin:10px 0">
+        <label><input type="radio" name="cmode" ${d.mode === 'cartons' ? 'checked' : ''} onclick="setCartonMode('cartons')"> Multiple cartons</label>
+        &nbsp;&nbsp;
+        <label><input type="radio" name="cmode" ${d.mode === 'cbm' ? 'checked' : ''} onclick="setCartonMode('cbm')"> Single CBM</label>
+      </div>
+      ${d.mode === 'cartons' ? `
+        <div class="table-wrap"><table class="rate-table">
+          <thead><tr><th>Length cm</th><th>Width cm</th><th>Height cm</th><th>Kg (opt)</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+        <button class="btn btn-secondary" style="margin-top:8px" onclick="addCartonRow()">+ Add carton</button>
+        <p class="hint">Kg is optional — leave blank to use the carton's cubic volume (the app's weight = CBM convention).</p>
+      ` : `
+        <label>Product CBM (m³) <input type="number" step="0.001" min="0" value="${d.cbm ?? ''}" oninput="cartonField(null,'cbm',this.value)" style="width:120px"></label>
+        <p class="hint">Ships as one box — same as the automatic estimate, but using the CBM you set here.</p>
+      `}
+      <div style="margin-top:12px">
+        <button class="btn btn-primary" onclick="saveCarton()">Save</button>
+        <button class="btn btn-secondary" onclick="closeCartonEditor()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function cartonField(i, field, val) {
+  const num = (val === '' || val == null) ? undefined : parseFloat(val);
+  if (field === 'cbm') { _cartonDraft.cbm = (num == null ? '' : num); return; }
+  if (!_cartonDraft.cartons[i]) _cartonDraft.cartons[i] = {};
+  if (num === undefined) delete _cartonDraft.cartons[i][field];
+  else _cartonDraft.cartons[i][field] = num;
+}
+function addCartonRow() { _cartonDraft.cartons.push({}); renderCartonEditor(); }
+function removeCartonRow(i) { _cartonDraft.cartons.splice(i, 1); if (!_cartonDraft.cartons.length) _cartonDraft.cartons.push({}); renderCartonEditor(); }
+function setCartonMode(m) { _cartonDraft.mode = m; renderCartonEditor(); }
+function closeCartonEditor() { _cartonDraft = null; document.getElementById('carton-editor').style.display = 'none'; document.getElementById('carton-editor').innerHTML = ''; }
+
+async function saveCarton() {
+  const d = _cartonDraft;
+  const payload = { key: d.key, title: d.title };
+  if (d.mode === 'cartons') {
+    const cartons = (d.cartons || []).filter(c => (c.length_cm && c.width_cm && c.height_cm) || c.cbm);
+    if (!cartons.length) { alert('Add at least one carton with Length/Width/Height (or switch to Single CBM).'); return; }
+    payload.cartons = cartons;
+  } else {
+    if (!d.cbm) { alert('Enter a CBM value.'); return; }
+    payload.cbm = d.cbm;
+  }
+  try {
+    const r = await fetch('/api/cartons', {
+      method: 'PUT', headers: adminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload)
+    });
+    if (!r.ok) throw new Error(await r.text());
+    closeCartonEditor();
+    document.getElementById('carton-search').value = '';
+    document.getElementById('carton-search-results').innerHTML = '';
+    await loadCartons();
+  } catch (e) { alert('Could not save: ' + e.message); }
+}
+
+async function removeCarton(key) {
+  if (!confirm('Remove the carton mapping for this product?')) return;
+  try {
+    const r = await fetch('/api/cartons/' + encodeURIComponent(key), { method: 'DELETE', headers: adminHeaders() });
+    if (!r.ok) throw new Error(await r.text());
+    await loadCartons();
+  } catch (e) { alert('Could not remove: ' + e.message); }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const cs = document.getElementById('carton-search');
+  if (cs) cs.addEventListener('input', renderCartonSearch);
 });
 
 // ── Rate log tab ──────────────────────────────────────────────────────────

@@ -375,6 +375,90 @@ _COURIER_MAX_CBM = float(os.environ.get("COURIER_MAX_CBM", "0.13"))
 _PACKING_FACTOR = float(os.environ.get("PACKING_FACTOR", "1.15"))
 
 
+# ── Per-product carton map ───────────────────────────────────────────────────
+# Most furniture ships as one or more real cartons whose TRUE dimensions decide
+# courier eligibility — but Shopify stores only a single lumped CBM per variant,
+# which _build_packages would otherwise model as one fat cube and push over the
+# courier cap (so Castle Parcels never quotes and the order falls to the pricier
+# pallet / two-man rate — the Nova problem). This curated map (data/cartons.json,
+# editable in the admin UI) gives GoSweetSpot the real cartons for such products.
+#
+# Keyed by Shopify SKU or product_id (SKU wins). Two input modes per product:
+#   • cartons: [{length_cm,width_cm,height_cm, kg?}, …]  — explicit cartons, OR
+#   • cartons: [{cbm}, …]  /  top-level  cbm: <m³>       — cube(s) from a CBM.
+# Fail-safe: a bad/missing file → empty map, so every product simply keeps the
+# cube-from-CBM behaviour and a checkout quote is never blocked.
+CARTONS_FILE = BASE_DIR / "data" / "cartons.json"
+_carton_map_cache = None
+
+
+def _carton_to_package(c: dict) -> Optional[dict]:
+    """Normalise one carton spec → a GoSweetSpot package dict (None if unusable)."""
+    L, W, H = c.get("length_cm"), c.get("width_cm"), c.get("height_cm")
+    if L and W and H:
+        L, W, H = float(L), float(W), float(H)
+        cbm = (L * W * H) / 1_000_000.0                  # cm³ → m³
+        kg = float(c.get("kg") or 0) or round(cbm, 3)    # weight=CBM convention unless a real kg is given
+    else:
+        cbm = float(c.get("cbm") or 0)
+        if cbm <= 0:
+            return None
+        L, W, H = _cube_dimensions_cm(cbm)
+        kg = round(cbm, 3)
+    return {"Name": "Carton", "Length": round(L, 1), "Width": round(W, 1),
+            "Height": round(H, 1), "Kg": round(kg, 3), "Type": "Box"}
+
+
+def _entry_to_packages(entry: dict) -> list:
+    """A carton-map entry → GSS package dicts for ONE unit of the product."""
+    cartons = entry.get("cartons")
+    if isinstance(cartons, list) and cartons:
+        return [p for p in (_carton_to_package(c) for c in cartons if isinstance(c, dict)) if p]
+    cbm = float(entry.get("cbm") or 0)                    # simple mode: one cube from the product CBM
+    p = _carton_to_package({"cbm": cbm}) if cbm > 0 else None
+    return [p] if p else []
+
+
+def _load_carton_map() -> dict:
+    """SKU/product_id → {'packages': [GSS cartons for one unit], 'title': str}. Cached."""
+    global _carton_map_cache
+    if _carton_map_cache is None:
+        m = {}
+        try:
+            data = json.loads(CARTONS_FILE.read_text()) if CARTONS_FILE.exists() else []
+            for e in data:
+                if not isinstance(e, dict):
+                    continue
+                key = str(e.get("key") or "").strip()
+                if not key:
+                    continue
+                pkgs = _entry_to_packages(e)
+                if pkgs:
+                    m[key] = {"packages": pkgs, "title": e.get("title", "")}
+        except Exception:
+            logger.exception("cartons.json unreadable — treating as empty (cube-from-CBM for all)")
+            m = {}
+        _carton_map_cache = m
+    return _carton_map_cache
+
+
+def reload_carton_map():
+    """Force reload of the carton map from disk (for the admin /api/cartons writes)."""
+    global _carton_map_cache
+    _carton_map_cache = None
+
+
+def _carton_packages_for(item: dict) -> Optional[list]:
+    """Mapped cartons for a cart line (SKU first, then product_id), else None."""
+    cmap = _load_carton_map()
+    if not cmap:
+        return None
+    sku = str(item.get("sku") or "").strip()
+    pid = str(item.get("product_id") or "").strip()
+    entry = (cmap.get(sku) if sku else None) or (cmap.get(pid) if pid else None)
+    return entry["packages"] if entry else None
+
+
 def _build_packages(items: list) -> list:
     """
     Turn the cart into realistic cartons for GoSweetSpot, separating courier-
@@ -397,9 +481,17 @@ def _build_packages(items: list) -> list:
     """
     small_kg = 0.0          # pooled CBM of courier-eligible items
     large_cartons = []      # one carton per oversize unit, at its real CBM
+    mapped_cartons = []     # real cartons from the carton map, sent to GSS as-is
     for item in items:
-        unit_cbm = float(item.get("grams", 0) or 0) / 1000.0
         qty = int(item.get("quantity", 1))
+        mapped = _carton_packages_for(item)
+        if mapped:
+            # Real cartons known for this product — emit them per unit so GSS can
+            # courier each one, bypassing the cube-from-CBM estimate below.
+            for _ in range(qty):
+                mapped_cartons.extend(mapped)
+            continue
+        unit_cbm = float(item.get("grams", 0) or 0) / 1000.0
         if unit_cbm > _COURIER_MAX_CBM:
             L, W, H = _cube_dimensions_cm(unit_cbm)
             for _ in range(qty):
@@ -417,7 +509,7 @@ def _build_packages(items: list) -> list:
         small_cartons = [{"Name": "Carton", "Length": L, "Width": W, "Height": H,
                           "Kg": round(kg_per_carton, 3), "Type": "Box"} for _ in range(n_cartons)]
 
-    packages = large_cartons + small_cartons
+    packages = mapped_cartons + large_cartons + small_cartons
     if not packages:
         return [{"Name": "Carton", "Length": 5, "Width": 5, "Height": 5, "Kg": 0.001, "Type": "Box"}]
     return packages

@@ -938,6 +938,99 @@ async def carrier_info():
         return json.load(f)
 
 
+# ─── Carton map (per-product real cartons for courier quoting) ───────────────────
+# Lets a product declare its true shipping cartons so Castle Parcels can quote each
+# one, instead of modelling one fat cube from the lumped Shopify CBM (which forces
+# multi-piece items like the Nova onto the pricier pallet / two-man rate). Stored on
+# the Render disk; a bad/missing file is treated as empty (cube-from-CBM for all).
+CARTONS_FILE = BASE_DIR / "data" / "cartons.json"
+
+
+def _load_cartons() -> list:
+    try:
+        return json.loads(CARTONS_FILE.read_text()) if CARTONS_FILE.exists() else []
+    except Exception:
+        return []
+
+
+def _save_cartons(data: list):
+    CARTONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CARTONS_FILE.write_text(json.dumps(data, indent=2))
+    live_rates.reload_carton_map()  # refresh the in-memory map used at checkout
+
+
+def _sanitise_carton(c):
+    """Keep only a valid carton: positive L/W/H (+optional kg), or a positive cbm."""
+    if not isinstance(c, dict):
+        return None
+
+    def pos(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return v if v > 0 else None
+
+    L, W, H = pos(c.get("length_cm")), pos(c.get("width_cm")), pos(c.get("height_cm"))
+    if L and W and H:
+        out = {"length_cm": L, "width_cm": W, "height_cm": H}
+        kg = pos(c.get("kg"))
+        if kg:
+            out["kg"] = kg
+        return out
+    cbm = pos(c.get("cbm"))
+    return {"cbm": cbm} if cbm else None
+
+
+@app.get("/api/cartons")
+async def cartons_list():
+    """The per-product carton map — for the admin Cartons tab."""
+    return {"items": _load_cartons()}
+
+
+@app.put("/api/cartons", dependencies=[Depends(require_admin)])
+async def cartons_upsert(request: Request):
+    """
+    Add/update one product's carton spec. Idempotent by key (SKU or product_id).
+    Body: {key, title?, cartons?: [{length_cm,width_cm,height_cm,kg?} | {cbm}], cbm?}
+    Provide EITHER a cartons list OR a single cbm (one cube from the product CBM).
+    """
+    body = await request.json()
+    key = str(body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "key (SKU or product_id) required")
+    entry = {"key": key, "title": (body.get("title") or "").strip()}
+    cartons_in = body.get("cartons")
+    if isinstance(cartons_in, list) and cartons_in:
+        cartons = [c for c in (_sanitise_carton(x) for x in cartons_in) if c]
+        if not cartons:
+            raise HTTPException(400, "no valid cartons — each needs length_cm/width_cm/height_cm or cbm")
+        entry["cartons"] = cartons
+    else:
+        try:
+            cbm = float(body.get("cbm") or 0)
+        except (TypeError, ValueError):
+            cbm = 0
+        if cbm <= 0:
+            raise HTTPException(400, "provide a cartons list or a positive cbm")
+        entry["cbm"] = cbm
+    items = [e for e in _load_cartons() if str(e.get("key")) != key]
+    items.append(entry)
+    items.sort(key=lambda e: (e.get("title") or "").lower())
+    _save_cartons(items)
+    return {"status": "ok", "count": len(items), "items": items}
+
+
+@app.delete("/api/cartons/{key}", dependencies=[Depends(require_admin)])
+async def cartons_remove(key: str):
+    """Remove one product's carton mapping."""
+    k = str(key).strip()
+    before = _load_cartons()
+    items = [e for e in before if str(e.get("key")) != k]
+    _save_cartons(items)
+    return {"status": "ok", "removed": len(before) - len(items), "count": len(items), "items": items}
+
+
 # ─── CBM Admin API ─────────────────────────────────────────────────────────────
 # Pulls product weights from Shopify so the UI can browse + edit them.
 # Uses the admin access token stored in env (SHOPIFY_ADMIN_TOKEN) for write
