@@ -388,8 +388,36 @@ _PACKING_FACTOR = float(os.environ.get("PACKING_FACTOR", "1.15"))
 #   • cartons: [{cbm}, …]  /  top-level  cbm: <m³>       — cube(s) from a CBM.
 # Fail-safe: a bad/missing file → empty map, so every product simply keeps the
 # cube-from-CBM behaviour and a checkout quote is never blocked.
-CARTONS_FILE = BASE_DIR / "data" / "cartons.json"
+# Stored on the Render persistent disk (RATE_LOG_DIR, e.g. /var/data) so cartons the
+# warehouse team enter survive redeploys — same disk the rate log uses. Falls back to
+# the committed repo copy (baseline) on a freshly-provisioned disk, and to ./data
+# locally where RATE_LOG_DIR is unset.
+_PERSIST_DIR = Path(os.environ.get("RATE_LOG_DIR", str(BASE_DIR / "data")))
+CARTONS_FILE = _PERSIST_DIR / "cartons.json"
+_CARTONS_REPO = BASE_DIR / "data" / "cartons.json"
 _carton_map_cache = None
+
+
+def _read_cartons_file() -> list:
+    """Raw entries: prefer the persistent disk, else the repo baseline, else empty."""
+    path = CARTONS_FILE if CARTONS_FILE.exists() else _CARTONS_REPO
+    return json.loads(path.read_text()) if path.exists() else []
+
+
+def read_carton_entries() -> list:
+    """Raw carton-map entries for the admin API (never raises)."""
+    try:
+        return _read_cartons_file()
+    except Exception:
+        logger.exception("cartons.json unreadable")
+        return []
+
+
+def write_carton_entries(data: list) -> None:
+    """Persist carton-map entries to the Render disk and refresh the in-memory map."""
+    CARTONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CARTONS_FILE.write_text(json.dumps(data, indent=2))
+    reload_carton_map()
 
 
 def _carton_to_package(c: dict) -> Optional[dict]:
@@ -425,7 +453,7 @@ def _load_carton_map() -> dict:
     if _carton_map_cache is None:
         m = {}
         try:
-            data = json.loads(CARTONS_FILE.read_text()) if CARTONS_FILE.exists() else []
+            data = _read_cartons_file()
             for e in data:
                 if not isinstance(e, dict):
                     continue

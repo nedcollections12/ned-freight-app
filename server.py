@@ -941,22 +941,15 @@ async def carrier_info():
 # ─── Carton map (per-product real cartons for courier quoting) ───────────────────
 # Lets a product declare its true shipping cartons so Castle Parcels can quote each
 # one, instead of modelling one fat cube from the lumped Shopify CBM (which forces
-# multi-piece items like the Nova onto the pricier pallet / two-man rate). Stored on
-# the Render disk; a bad/missing file is treated as empty (cube-from-CBM for all).
-CARTONS_FILE = BASE_DIR / "data" / "cartons.json"
-
-
+# multi-piece items like the Nova onto the pricier pallet / two-man rate). Path +
+# persistence live in live_rates (Render disk, so warehouse entries survive deploys);
+# a bad/missing file is treated as empty (cube-from-CBM for all).
 def _load_cartons() -> list:
-    try:
-        return json.loads(CARTONS_FILE.read_text()) if CARTONS_FILE.exists() else []
-    except Exception:
-        return []
+    return live_rates.read_carton_entries()
 
 
 def _save_cartons(data: list):
-    CARTONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CARTONS_FILE.write_text(json.dumps(data, indent=2))
-    live_rates.reload_carton_map()  # refresh the in-memory map used at checkout
+    live_rates.write_carton_entries(data)  # writes to the Render disk + refreshes the in-memory map
 
 
 def _sanitise_carton(c):
