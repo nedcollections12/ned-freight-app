@@ -131,6 +131,17 @@ PALLET_RULE_ENABLED = os.environ.get("PALLET_RULE_ENABLED", "1") == "1"
 # Dailyfreight so a courier / Mainfreight Two-Man wins instead.
 PALLET_MIN_CBM = float(os.environ.get("PALLET_MIN_CBM", "0.8"))
 
+# COURIER FALLBACK — when Castle Parcels (GSS) fails to return a quote for a small,
+# courier-sized cart, the Mainfreight/Dailyfreight freight minimums (~$90-190) are
+# nonsensical for courier goods and lose the sale (a known ~20% GSS drop-out on slow
+# lanes). Instead charge a flat % of the order's GST-EXCLUSIVE value — close to NED's
+# average courier cost — so the customer always sees a sane rate. Fires ONLY for a
+# non-oversize cart below PALLET_MIN_CBM with NO courier quote; large/pallet carts
+# keep their real MF/DF freight rate. Kill switch: COURIER_FALLBACK_ENABLED=0.
+COURIER_FALLBACK_ENABLED = os.environ.get("COURIER_FALLBACK_ENABLED", "1") != "0"
+COURIER_FALLBACK_PCT = float(os.environ.get("COURIER_FALLBACK_PCT", "0.08"))  # 8% of ex-GST order
+COURIER_FALLBACK_MIN = float(os.environ.get("COURIER_FALLBACK_MIN", "0"))     # optional $ floor (0 = off)
+
 # Mainfreight Rating API resilience: one fast retry on a transient miss (timeout /
 # 5xx / connection reset) so a single blip doesn't drop MF/DF to "Contact Us" under
 # LIVE_ONLY. Under LIVE_ONLY the timeout tightens to 4s so call + retry still fits
@@ -551,6 +562,15 @@ def _total_cbm(items: list) -> float:
         grams = float(item.get("grams", 0) or 0)
         total += (grams / 1000.0) * qty
     return total
+
+
+def _order_value_incl_gst(items: list) -> float:
+    """Cart value from the Shopify rate request (item `price` is cents, GST-inclusive)."""
+    try:
+        return sum((int(i.get("price", 0)) / 100.0) * int(i.get("quantity", 1))
+                   for i in (items or []))
+    except Exception:
+        return 0.0
 
 
 # GSS geocodes off the City field and rejects some legacy / amalgamated
@@ -1026,6 +1046,32 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
                 df_fb["_source"] += "  [postcode/province fallback]"
                 quotes.append(df_fb)
 
+    # COURIER FALLBACK: a small, non-oversize cart with NO courier quote means Castle
+    # Parcels (GSS) dropped out — the MF/DF freight minimums (~$90-190) are nonsensical
+    # for courier goods and lose the sale. Replace them with a % of the ex-GST order
+    # value (close to NED's average courier cost) so the customer sees a sane rate.
+    # Also rescues the empty-quotes case for a small courier cart.
+    if (COURIER_FALLBACK_ENABLED
+            and not any(_is_courier_quote(q) for q in quotes)
+            and not _cart_has_oversize(items)
+            and cart_cbm < PALLET_MIN_CBM):
+        ov = _order_value_incl_gst(items)
+        if ov > 0:
+            ex_gst = ov / GST_MULTIPLIER
+            price = round(max(ex_gst * COURIER_FALLBACK_PCT, COURIER_FALLBACK_MIN), 2)
+            quotes = [{
+                "carrier": "Standard Delivery",
+                "service": "Courier",
+                # raw_cost is back-calculated so the ×NED_MARKUP below lands exactly on
+                # `price` — the % is already the final charge, not a cost to mark up again.
+                "raw_cost": round(price / NED_MARKUP, 2),
+                "_source": (f"Courier fallback {COURIER_FALLBACK_PCT * 100:.0f}% of ex-GST order "
+                            f"(${ex_gst:.2f}) — Castle Parcels unavailable"),
+                "_fallback": True,
+            }]
+            logger.warning("Courier fallback for %s: CP unavailable on %.3fm³ cart → $%.2f (%.0f%% of $%.2f ex-GST)",
+                           destination.get("city", "?"), cart_cbm, price, COURIER_FALLBACK_PCT * 100, ex_gst)
+
     if not quotes:
         return {
             "success": False,
@@ -1058,7 +1104,9 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
         result["all_quotes"] = quotes  # full set considered
         result["eligible_quotes"] = eligible  # after service-rule filtering
         # Report the rule that actually changed the eligible set (not just what was tested)
-        if not PALLET_RULE_ENABLED or eligible is quotes:
+        if cheapest.get("_fallback"):
+            rule = "courier_fallback"
+        elif not PALLET_RULE_ENABLED or eligible is quotes:
             rule = "none"
         elif _cart_has_oversize(items):
             rule = "oversize->two_man"
