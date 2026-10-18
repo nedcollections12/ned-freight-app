@@ -781,7 +781,10 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
         fb = _fallback_keys(destination)
         pc_city = fb[0] if fb else None
         if pc_city and _strip_diacritics(pc_city.lower()) != _strip_diacritics(gss_city.lower()):
+            # Overwrite BOTH City and Suburb — a region name left in Suburb ("Bay of
+            # Plenty") still breaks GSS geocoding even once the City is corrected.
             payload["Destination"]["Address"]["City"] = pc_city
+            payload["Destination"]["Address"]["Suburb"] = pc_city
             try:
                 r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=timeout)
                 if r.status_code == 200:
