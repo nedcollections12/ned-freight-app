@@ -360,12 +360,29 @@ def _is_auckland(destination: dict) -> bool:
     return False
 
 
+def _norm_incoming_branch(val: str) -> str:
+    """Map a `custom.incoming_warehouse` metafield string (e.g. "Christchurch",
+    "Auckland Warehouse") to our branch tag — "akl" / "chch" / "" (unknown). Used to tell
+    which branch a pre-order's replenishment is actually landing at, so we never offer
+    pickup at a branch the stock will never reach."""
+    s = (val or "").strip().lower()
+    if not s:
+        return ""
+    if any(t in s for t in ("auck", "mangere", "māngere", "akl", "ascot")):
+        return "akl"
+    if any(t in s for t in ("christ", "chch", "wigram", "canter", "paradyne", "sydenham")):
+        return "chch"
+    return ""
+
+
 async def get_location_stock(variant_ids: list) -> dict:
     """
-    {variant_id(str): {"akl","akl_oh","chch","chch_oh"}} for the two NZ locations,
+    {variant_id(str): {"akl","akl_oh","chch","chch_oh","inc_wh"}} for the two NZ locations,
     where the plain keys are AVAILABLE and *_oh are ON_HAND (physical). on_hand is used
     to tell a genuinely Auckland-exclusive item from a dual-stocked one — "available"
     goes negative on backorder (CHCH sells-when-out-of-stock) and must never gate routing.
+    `inc_wh` is the branch a pre-order's incoming stock is bound for ("akl"/"chch"/""),
+    read from the custom.incoming_warehouse metafield — used to gate pre-order pickup.
     Fail-safe: returns {} on any error so callers fall back to normal behaviour.
     """
     gids = [f"gid://shopify/ProductVariant/{v}" for v in variant_ids if v]
@@ -376,6 +393,7 @@ async def get_location_stock(variant_ids: list) -> dict:
       nodes(ids: $ids) {
         ... on ProductVariant {
           legacyResourceId
+          incW: metafield(namespace:"custom", key:"incoming_warehouse") { value }
           inventoryItem { inventoryLevels(first: 20) { edges { node {
             location { id }
             quantities(names: ["available", "on_hand"]) { name quantity }
@@ -401,7 +419,8 @@ async def get_location_stock(variant_ids: list) -> dict:
         if not node:
             continue
         vid = str(node.get("legacyResourceId") or "")
-        rec = {"akl": 0, "akl_oh": 0, "chch": 0, "chch_oh": 0}
+        rec = {"akl": 0, "akl_oh": 0, "chch": 0, "chch_oh": 0,
+               "inc_wh": _norm_incoming_branch((node.get("incW") or {}).get("value"))}
         levels = (node.get("inventoryItem") or {}).get("inventoryLevels", {}).get("edges", [])
         for e in levels:
             loc = e["node"]["location"]["id"]
@@ -493,11 +512,12 @@ async def _branch_pickup_rates(items: list, currency: str, destination: dict) ->
 
     def branch_has_all(oh_key: str, other_oh_key: str) -> bool:
         # A branch's pickup is offered when, for EVERY line, the branch either physically
-        # holds it now OR neither branch can fulfil it yet — a pre-order / coming-soon line
-        # (zero on-hand everywhere) that will be fulfilled to the customer's LOCAL branch
-        # when stock lands, so collect is valid (the option's copy already says "we'll email
-        # you when it's ready to collect"). Only a line the OTHER branch can ship in full is a
-        # genuine out-of-region item and blocks local pickup. Fail-safe: unknown variant -> block.
+        # holds it now OR it's a pre-order whose incoming stock is bound for THIS branch
+        # (so "we'll email you when it's ready to collect" can actually be honoured here).
+        # Blocks when: the OTHER branch holds it in full (out-of-region), OR a pre-order's
+        # replenishment lands at a different branch (e.g. a Christchurch-bound coming-soon
+        # item must NOT be offered for Auckland collection). Fail-safe: unknown variant -> block.
+        this_branch = oh_key[:-3]  # "chch_oh" -> "chch", "akl_oh" -> "akl"
         for i in items:
             s = stock.get(str(i.get("variant_id")))
             if s is None:
@@ -507,7 +527,11 @@ async def _branch_pickup_rates(items: list, currency: str, destination: dict) ->
                 continue  # local branch physically holds this line
             if s.get(other_oh_key, 0) >= q:
                 return False  # other branch holds it in full -> out-of-region, not collectable here
-            # else: neither branch holds it -> pre-order/incoming -> collectable from local branch
+            # neither branch holds it -> pre-order/incoming. Only collectable at the local
+            # branch if the incoming stock is actually arriving HERE; otherwise it lands at
+            # the other branch (or we can't confirm) and local collect can never be honoured.
+            if s.get("inc_wh") != this_branch:
+                return False
         return True
 
     out = []
