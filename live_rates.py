@@ -773,9 +773,28 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
 
     options = data.get("Available", [])
     if not options:
-        logger.warning("GSS dropped CP for %s: no Available options (rejected=%s) — falling back to MF/DF formula",
-                       _dest_label, len(data.get("Rejected", [])))
-        return None
+        # GSS geocodes off the City/Suburb text, so a bad label — a region name ("Bay of
+        # Plenty") or a city mismatched to its postcode ("Christchurch" + rural 7616) — can
+        # return zero options even on a serviceable lane. The POSTCODE is authoritative, so
+        # retry once with the postcode-derived city before giving up. This "no options"
+        # response came back fast (GSS answered), so the extra call stays inside the window.
+        fb = _fallback_keys(destination)
+        pc_city = fb[0] if fb else None
+        if pc_city and _strip_diacritics(pc_city.lower()) != _strip_diacritics(gss_city.lower()):
+            payload["Destination"]["Address"]["City"] = pc_city
+            try:
+                r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=timeout)
+                if r.status_code == 200:
+                    data = r.json()
+                    options = data.get("Available", [])
+                    if options:
+                        logger.info("GSS rescued %s via postcode-city '%s'", _dest_label, pc_city)
+            except Exception as e:
+                logger.info("GSS postcode-city rescue failed for %s: %s", _dest_label, type(e).__name__)
+        if not options:
+            logger.warning("GSS dropped CP for %s: no Available options (rejected=%s) — falling back to MF/DF formula",
+                           _dest_label, len(data.get("Rejected", [])))
+            return None
 
     # SAFETY FILTER: drop suspiciously low quotes for large items.
     # GSS sometimes returns Kiwi Express Car-Economy at $13-86 for cube >1m³,
