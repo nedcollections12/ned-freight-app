@@ -18,6 +18,7 @@ import math
 import os
 import re
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -610,6 +611,91 @@ _GSS_CITY_REMAP = {
 }
 
 
+# ── Castle Parcels resilience: quote cache + courier retry ───────────────────────
+# GSS is one flaky, latency-bound call (Singapore→NZ) with no retry room inside
+# Shopify's ~10s window, so transient misses drop the courier quote. Two defences:
+#   1. Cache each SUCCESSFUL CP rate per lane (postcode + CBM bucket); reuse on a miss
+#      so a lane that quoted recently serves its real last-good rate instead of the 8%
+#      fallback — and repeat quotes skip GSS entirely (faster). Disk-backed so it
+#      survives restarts. Analysis showed ~26 of 29 recurring "no-option" lanes were
+#      transient (serviced on retry) — exactly what the cache rescues.
+#   2. For a COURIER-ONLY cart (few small parcels → fast), a tightened timeout + one
+#      retry fits the window and recovers transient timeouts for the carts that matter.
+CP_CACHE_ENABLED = os.environ.get("CP_CACHE_ENABLED", "1") != "0"
+CP_CACHE_TTL_HOURS = float(os.environ.get("CP_CACHE_TTL_HOURS", "24"))
+CP_CACHE_BUCKET = float(os.environ.get("CP_CACHE_BUCKET", "0.05"))   # CBM bucket size (m³)
+CP_CACHE_FILE = _PERSIST_DIR / "cp_quote_cache.json"
+
+GSS_TIMEOUT = float(os.environ.get("GSS_TIMEOUT", "9.0"))             # full-budget single attempt
+GSS_COURIER_TIMEOUT = float(os.environ.get("GSS_COURIER_TIMEOUT", "4.0"))  # ×2 attempts = 8s < Shopify window
+GSS_COURIER_ATTEMPTS = int(os.environ.get("GSS_COURIER_ATTEMPTS", "2"))
+
+_cp_cache = None
+
+
+def _cp_cache_load() -> dict:
+    global _cp_cache
+    if _cp_cache is None:
+        try:
+            _cp_cache = json.loads(CP_CACHE_FILE.read_text()) if CP_CACHE_FILE.exists() else {}
+        except Exception:
+            _cp_cache = {}
+    return _cp_cache
+
+
+def _cp_cache_key(destination: dict, cart_cbm: float) -> Optional[str]:
+    pc = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    if not pc:
+        return None  # no stable lane key → don't cache
+    country = (destination.get("country") or "NZ").strip().upper()
+    bucket = round(round(cart_cbm / CP_CACHE_BUCKET) * CP_CACHE_BUCKET, 3)
+    return f"{country}:{pc}:{bucket}"
+
+
+def _cp_cache_put(destination: dict, cart_cbm: float, cp: dict) -> None:
+    """Store a successful CP quote for this lane (best-effort, never raises)."""
+    if not CP_CACHE_ENABLED:
+        return
+    key = _cp_cache_key(destination, cart_cbm)
+    if not key:
+        return
+    try:
+        c = _cp_cache_load()
+        c[key] = {"raw_cost": cp.get("raw_cost"), "carrier": cp.get("carrier"),
+                  "service": cp.get("service"), "ts": datetime.now(timezone.utc).isoformat()}
+        CP_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CP_CACHE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(c))
+        tmp.replace(CP_CACHE_FILE)  # atomic
+    except Exception:
+        logger.exception("cp cache write failed")
+
+
+def _cp_cache_get(destination: dict, cart_cbm: float) -> Optional[dict]:
+    """Last-good CP quote for this lane if still within TTL, else None."""
+    if not CP_CACHE_ENABLED:
+        return None
+    key = _cp_cache_key(destination, cart_cbm)
+    if not key:
+        return None
+    e = _cp_cache_load().get(key)
+    if not e or e.get("raw_cost") is None:
+        return None
+    try:
+        age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(e["ts"])).total_seconds() / 3600
+    except Exception:
+        return None
+    if age_h > CP_CACHE_TTL_HOURS:
+        return None
+    return {
+        "carrier": e.get("carrier") or "Post Haste - Freight Forwards",
+        "service": e.get("service") or "Courier",
+        "raw_cost": e["raw_cost"],
+        "_source": f"Castle Parcels cached last-good rate ({age_h:.0f}h old) — GSS unavailable this call",
+        "_cached": True,
+    }
+
+
 async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]:
     """
     Live quote from GoSweetSpot (Castle Parcels / Post Haste).
@@ -649,26 +735,32 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
         "Content-Type": "application/json",
     }
 
-    # Single attempt, no retry: a retry could stack to ~18s and blow Shopify's
-    # ~10s carrier-service window (which makes checkout show NO rate at all).
-    # 9s catches GoSweetSpot's slow tail — inter-region lanes return more carriers
-    # and are slower from our Singapore region — while leaving ~1s headroom for
-    # the instant MF/DF formulas + serialization. The app is hosted far from the
-    # NZ GSS API, so a too-tight timeout silently drops Castle Parcels on slow
-    # lanes and falls back to the expensive palletised formula (the recurring
-    # overcharge bug). Every drop below is logged so the failure is visible.
+    # A COURIER-ONLY cart (few, small parcels) returns from GSS fast, so we take a
+    # tightened timeout + one retry — two shots fit Shopify's ~10s window and recover
+    # transient timeouts for exactly the carts that matter. A freight-sized cart is slow
+    # and legitimately ships MF/DF, so it keeps a single full-budget attempt (a retry
+    # there could stack to ~18s and blow the window → no rate at checkout). Every drop
+    # is logged so the failure stays visible.
     _dest_label = f"{dest_payload['Address']['Suburb']} {dest_payload['Address']['PostCode']}".strip()
-    try:
-        r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=9.0)
-        if r.status_code != 200:
-            logger.warning("GSS dropped CP for %s: HTTP %s — falling back to MF/DF formula",
-                           _dest_label, r.status_code)
+    courier_only = _cart_is_courier_only(items)
+    timeout = GSS_COURIER_TIMEOUT if courier_only else GSS_TIMEOUT
+    attempts = GSS_COURIER_ATTEMPTS if courier_only else 1
+    data = None
+    for attempt in range(1, attempts + 1):
+        try:
+            r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=timeout)
+            if r.status_code != 200:
+                logger.warning("GSS dropped CP for %s: HTTP %s — falling back", _dest_label, r.status_code)
+                return None
+            data = r.json()
+            break
+        except Exception as e:
+            if attempt < attempts:
+                logger.info("GSS slow for %s (%s) — retry %d/%d", _dest_label, type(e).__name__, attempt, attempts - 1)
+                continue
+            logger.warning("GSS dropped CP for %s: %s: %s — falling back", _dest_label, type(e).__name__, e)
             return None
-        data = r.json()
-    except Exception as e:
-        # GSS timeout/error → fall back to MF/DF formulas (instant)
-        logger.warning("GSS dropped CP for %s: %s: %s — falling back to MF/DF formula",
-                       _dest_label, type(e).__name__, e)
+    if data is None:
         return None
 
     options = data.get("Available", [])
@@ -1031,6 +1123,13 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     )
     if cp:
         quotes.append(cp)
+        _cp_cache_put(destination, cart_cbm, cp)  # remember this lane's good rate
+    else:
+        # GSS missed — serve this lane's last-good CP rate if we have a fresh one, so a
+        # transient drop-out doesn't bounce a courier cart onto freight / the 8% fallback.
+        cached = _cp_cache_get(destination, cart_cbm)
+        if cached:
+            quotes.append(cached)
 
     # Mainfreight — live API is authoritative. Under LIVE_ONLY the static rate-card
     # formula is retired (a live miss + one retry falls through to "Contact Us");
