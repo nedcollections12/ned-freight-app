@@ -627,8 +627,14 @@ CP_CACHE_BUCKET = float(os.environ.get("CP_CACHE_BUCKET", "0.05"))   # CBM bucke
 CP_CACHE_FILE = _PERSIST_DIR / "cp_quote_cache.json"
 
 GSS_TIMEOUT = float(os.environ.get("GSS_TIMEOUT", "9.0"))             # full-budget single attempt
-GSS_COURIER_TIMEOUT = float(os.environ.get("GSS_COURIER_TIMEOUT", "4.0"))  # ×2 attempts = 8s < Shopify window
-GSS_COURIER_ATTEMPTS = int(os.environ.get("GSS_COURIER_ATTEMPTS", "2"))
+# Layer-2 retry is OFF by default: GSS has a genuine slow tail (5-8s on provincial lanes,
+# the reason the timeout is 9s), and Shopify's ~10s window leaves no room for a second
+# full attempt — splitting the budget into 4s×2 would TIME OUT valid slow responses and
+# make accuracy WORSE on exactly the marginal lanes. The quote cache (Layer 1) is the real
+# resilience win (serves the last-good rate instantly on any miss). Only enable the retry
+# (ATTEMPTS=2, a reduced COURIER_TIMEOUT) if GSS latency is ever measured low enough.
+GSS_COURIER_TIMEOUT = float(os.environ.get("GSS_COURIER_TIMEOUT", "9.0"))
+GSS_COURIER_ATTEMPTS = int(os.environ.get("GSS_COURIER_ATTEMPTS", "1"))
 
 _cp_cache = None
 
