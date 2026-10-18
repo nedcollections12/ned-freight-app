@@ -573,6 +573,28 @@ def _order_value_incl_gst(items: list) -> float:
         return 0.0
 
 
+def _cart_is_courier_only(items: list) -> bool:
+    """
+    True iff EVERY parcel we'd hand GoSweetSpot is courier-sized — i.e. Castle Parcels
+    should physically be able to quote the whole cart. If CP then returns nothing, that's
+    a GSS drop-out (→ courier fallback is right). A cart with any oversize / freight-sized
+    parcel (a big single item) is genuinely NOT courierable, so MF/DF is the correct rate
+    and the fallback must NOT fire (else we'd overcharge a real freight load).
+    Uses the same package builder as the live CP quote, so the carton map is honoured
+    (a multi-carton item like the Nova counts as courier-only).
+    """
+    if _cart_has_oversize(items):
+        return False
+    pkgs = _build_packages(items)
+    if not pkgs:
+        return False
+    for p in pkgs:
+        cbm = (float(p.get("Length", 0)) * float(p.get("Width", 0)) * float(p.get("Height", 0))) / 1_000_000
+        if cbm > _COURIER_MAX_CBM + 1e-9:
+            return False
+    return True
+
+
 # GSS geocodes off the City field and rejects some legacy / amalgamated
 # council names (former cities and regional-district names) even with a valid
 # postcode — returning zero rate options. We remap those to the parent metro
@@ -1053,8 +1075,7 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     # Also rescues the empty-quotes case for a small courier cart.
     if (COURIER_FALLBACK_ENABLED
             and not any(_is_courier_quote(q) for q in quotes)
-            and not _cart_has_oversize(items)
-            and cart_cbm < PALLET_MIN_CBM):
+            and _cart_is_courier_only(items)):
         ov = _order_value_incl_gst(items)
         if ov > 0:
             ex_gst = ov / GST_MULTIPLIER
