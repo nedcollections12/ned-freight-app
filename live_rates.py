@@ -24,6 +24,8 @@ from typing import Optional
 
 import httpx
 
+import alerts
+
 logger = logging.getLogger("ned_freight")
 
 # Shared async HTTP client — reused across every quote so we don't pay a fresh
@@ -1178,27 +1180,47 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
     # for courier goods and lose the sale. Replace them with a % of the ex-GST order
     # value (close to NED's average courier cost) so the customer sees a sane rate.
     # Also rescues the empty-quotes case for a small courier cart.
+    _dlabel = f"{destination.get('city', '?')} {destination.get('postal_code') or destination.get('zip') or ''}".strip()
+
+    def _pct_quote(ex_gst: float, note: str) -> dict:
+        price = round(max(ex_gst * COURIER_FALLBACK_PCT, COURIER_FALLBACK_MIN), 2)
+        return {
+            "carrier": "Standard Delivery", "service": "Courier",
+            # raw_cost back-calculated so the ×NED_MARKUP below lands exactly on `price`
+            # — the % is already the final charge, not a cost to mark up again.
+            "raw_cost": round(price / NED_MARKUP, 2),
+            "_source": note, "_fallback": True, "_price": price,
+        }
+
+    # Courier fallback: a courier-only cart with NO courier quote means Castle Parcels
+    # dropped out — the MF/DF freight minimums (~$90+) are nonsensical for courier goods.
+    # Replace them with % of the ex-GST order (or the floor when the cart value is missing).
     if (COURIER_FALLBACK_ENABLED
             and not any(_is_courier_quote(q) for q in quotes)
             and _cart_is_courier_only(items)):
+        ex_gst = _order_value_incl_gst(items) / GST_MULTIPLIER
+        fb = _pct_quote(ex_gst, f"Courier fallback {COURIER_FALLBACK_PCT*100:.0f}% of ex-GST order "
+                                f"(${ex_gst:.2f}) — Castle Parcels unavailable")
+        if fb["_price"] > 0:   # guard: no value AND no floor → don't zero-out shipping
+            quotes = [fb]
+            logger.warning("Courier fallback for %s: CP unavailable on %.3fm³ → $%.2f", _dlabel, cart_cbm, fb["_price"])
+            alerts.record_fallback(f"{_dlabel}: courier {cart_cbm:.3f}m³ → ${fb['_price']}")
+
+    # Last resort: NOTHING quoted at all (all carriers down), ANY cart type. Serve % of the
+    # order so the customer still gets a rate instead of no_carrier_match (lost sale / free
+    # ship). This is the "if all carriers are down, give the 8%" case — now covering freight
+    # carts too, not just courier ones.
+    if not quotes and COURIER_FALLBACK_ENABLED:
         ov = _order_value_incl_gst(items)
         if ov > 0:
-            ex_gst = ov / GST_MULTIPLIER
-            price = round(max(ex_gst * COURIER_FALLBACK_PCT, COURIER_FALLBACK_MIN), 2)
-            quotes = [{
-                "carrier": "Standard Delivery",
-                "service": "Courier",
-                # raw_cost is back-calculated so the ×NED_MARKUP below lands exactly on
-                # `price` — the % is already the final charge, not a cost to mark up again.
-                "raw_cost": round(price / NED_MARKUP, 2),
-                "_source": (f"Courier fallback {COURIER_FALLBACK_PCT * 100:.0f}% of ex-GST order "
-                            f"(${ex_gst:.2f}) — Castle Parcels unavailable"),
-                "_fallback": True,
-            }]
-            logger.warning("Courier fallback for %s: CP unavailable on %.3fm³ cart → $%.2f (%.0f%% of $%.2f ex-GST)",
-                           destination.get("city", "?"), cart_cbm, price, COURIER_FALLBACK_PCT * 100, ex_gst)
+            fb = _pct_quote(ov / GST_MULTIPLIER, f"Last-resort {COURIER_FALLBACK_PCT*100:.0f}% of ex-GST "
+                                                 f"order — ALL carriers unavailable")
+            quotes = [fb]
+            logger.error("ALL carriers down for %s — last-resort $%.2f on $%.2f order", _dlabel, fb["_price"], ov)
+            alerts.record_all_carriers_down(f"{_dlabel}: ${fb['_price']} on ${ov:.0f} order, {cart_cbm:.3f}m³")
 
     if not quotes:
+        alerts.record_no_rate(f"{_dlabel}: cart ${_order_value_incl_gst(items):.0f}, {cart_cbm:.3f}m³ — no carrier, no fallback")
         return {
             "success": False,
             "error":   "no_carrier_match",

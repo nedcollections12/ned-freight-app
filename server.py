@@ -194,6 +194,7 @@ async def shopify_rates(request: Request):
         logger.exception("shopify_rates failed for %s", destination.get("city", ""))
         rate_log.log_rate(destination=destination, items=items, result=None,
                           status="error", rate=None, error=f"{type(e).__name__}: {e}")
+        live_rates.alerts.record_error(f"{destination.get('city','?')}: {type(e).__name__}: {e}")
         return {"rates": [{
             "service_name": "Freight — Contact Us",
             "service_code": "BY_REQUEST",
