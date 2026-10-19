@@ -362,16 +362,22 @@ def _is_auckland(destination: dict) -> bool:
 
 
 def _norm_incoming_branch(val: str) -> str:
-    """Map a `custom.incoming_warehouse` metafield string (e.g. "Christchurch",
-    "Auckland Warehouse") to our branch tag — "akl" / "chch" / "" (unknown). Used to tell
-    which branch a pre-order's replenishment is actually landing at, so we never offer
-    pickup at a branch the stock will never reach."""
+    """Map a `custom.incoming_warehouse` metafield string to our branch tag —
+    "akl" / "chch" / "both" / "" (unknown). Used to tell which branch a pre-order's
+    replenishment is landing at, so we never offer pickup at a branch the stock won't
+    reach. Values seen in the data include "Christchurch", "Auckland Warehouse" and
+    "Auckland & Christchurch" — the last must resolve to "both" (collectable at either),
+    not just the first branch matched."""
     s = (val or "").strip().lower()
     if not s:
         return ""
-    if any(t in s for t in ("auck", "mangere", "māngere", "akl", "ascot")):
+    is_akl  = any(t in s for t in ("auck", "mangere", "māngere", "akl", "ascot"))
+    is_chch = any(t in s for t in ("christ", "chch", "wigram", "canter", "paradyne", "sydenham"))
+    if is_akl and is_chch:
+        return "both"
+    if is_akl:
         return "akl"
-    if any(t in s for t in ("christ", "chch", "wigram", "canter", "paradyne", "sydenham")):
+    if is_chch:
         return "chch"
     return ""
 
@@ -529,9 +535,9 @@ async def _branch_pickup_rates(items: list, currency: str, destination: dict) ->
             if s.get(other_oh_key, 0) >= q:
                 return False  # other branch holds it in full -> out-of-region, not collectable here
             # neither branch holds it -> pre-order/incoming. Only collectable at the local
-            # branch if the incoming stock is actually arriving HERE; otherwise it lands at
-            # the other branch (or we can't confirm) and local collect can never be honoured.
-            if s.get("inc_wh") != this_branch:
+            # branch if the incoming stock is arriving HERE (or at BOTH branches); otherwise
+            # it lands elsewhere (or we can't confirm) and local collect can't be honoured.
+            if s.get("inc_wh") not in (this_branch, "both"):
                 return False
         return True
 
