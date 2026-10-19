@@ -231,8 +231,10 @@ async def _compute_rates(destination: dict, items: list, currency: str) -> dict:
     if akl and "rates" in akl:
         return {"rates": akl["rates"]}
 
-    # Live carrier quote (debug=True so the rate log captures the full carrier breakdown)
-    result = await live_rates.calculate_freight(items, destination, debug=True)
+    # Live carrier quote (debug=True so the rate log captures the full carrier breakdown).
+    # count_alerts=True: real retail checkout, so fallbacks here feed the ops alerts (the
+    # test/debug endpoints do NOT, to avoid false GSS-outage alarms from the test tab).
+    result = await live_rates.calculate_freight(items, destination, debug=True, count_alerts=True)
 
     # Whole-cart pickup — one per branch that physically holds the ENTIRE order, offered
     # to any customer (max flexibility). Shared helper so the Auckland-routing flow can't
@@ -801,7 +803,7 @@ async def leg_quote_endpoint(request: Request):
     if origin in ("akl", "auckland", "3323"):
         r = await live_rates.calculate_auckland_freight(items, destination)
     else:
-        r = await live_rates.calculate_freight(items, destination)
+        r = await live_rates.calculate_freight(items, destination, count_alerts=True)
     return {
         "success":        bool(r.get("success")),
         "origin":         origin,
@@ -833,7 +835,7 @@ async def shopify_rates_b2b(request: Request):
     if akl and "rates" in akl:
         return {"rates": akl["rates"]}
 
-    result = await live_rates.calculate_freight(items, destination, debug=True)
+    result = await live_rates.calculate_freight(items, destination, debug=True, count_alerts=True)  # real B2B checkout
 
     # Whole-cart pickup — one per branch holding the ENTIRE order, any customer (shared
     # helper, same as the retail flow). $0 carrier rate (native Local Pickup collapsed

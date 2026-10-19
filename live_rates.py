@@ -1135,7 +1135,7 @@ async def calculate_auckland_freight(items: list, destination: dict) -> dict:
     }
 
 
-async def calculate_freight(items: list, destination: dict, debug: bool = False) -> dict:
+async def calculate_freight(items: list, destination: dict, debug: bool = False, count_alerts: bool = False) -> dict:
     """
     Main entry: get quotes from all three carriers, pick cheapest, apply markup.
     Returns a dict suitable for Shopify carrier service response.
@@ -1226,7 +1226,8 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
         if fb["_price"] > 0:   # guard: no value AND no floor → don't zero-out shipping
             quotes = [fb]
             logger.warning("Courier fallback for %s: CP unavailable on %.3fm³ → $%.2f", _dlabel, cart_cbm, fb["_price"])
-            alerts.record_fallback(f"{_dlabel}: courier {cart_cbm:.3f}m³ → ${fb['_price']}")
+            if count_alerts:
+                alerts.record_fallback(f"{_dlabel}: courier {cart_cbm:.3f}m³ → ${fb['_price']}")
 
     # Last resort: NOTHING quoted at all (all carriers down), ANY cart type. Serve % of the
     # order so the customer still gets a rate instead of no_carrier_match (lost sale / free
@@ -1239,10 +1240,12 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False)
                                                  f"order — ALL carriers unavailable")
             quotes = [fb]
             logger.error("ALL carriers down for %s — last-resort $%.2f on $%.2f order", _dlabel, fb["_price"], ov)
-            alerts.record_all_carriers_down(f"{_dlabel}: ${fb['_price']} on ${ov:.0f} order, {cart_cbm:.3f}m³")
+            if count_alerts:
+                alerts.record_all_carriers_down(f"{_dlabel}: ${fb['_price']} on ${ov:.0f} order, {cart_cbm:.3f}m³")
 
     if not quotes:
-        alerts.record_no_rate(f"{_dlabel}: cart ${_order_value_incl_gst(items):.0f}, {cart_cbm:.3f}m³ — no carrier, no fallback")
+        if count_alerts:
+            alerts.record_no_rate(f"{_dlabel}: cart ${_order_value_incl_gst(items):.0f}, {cart_cbm:.3f}m³ — no carrier, no fallback")
         return {
             "success": False,
             "error":   "no_carrier_match",
