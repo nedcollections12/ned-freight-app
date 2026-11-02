@@ -351,6 +351,61 @@ def _fallback_keys(destination: dict) -> Optional[tuple]:
     return None
 
 
+# Fine-grained postcode → town overrides for places the carriers mis-geocode when
+# the customer types the wrong city. Mainfreight/Dailyfreight/GSS all rate off the
+# city TEXT, so "129 Estuary Drive, Auckland, 0505" (actually Mangawhai, rural
+# Northland) was rated as Auckland metro — ~half the true two-man rate. Sending the
+# real town name gets the correct rate (Mangawhai M2H $281 vs Auckland $120).
+# Only needed where the region hub (_fallback_keys) is itself too coarse to be
+# accurate; extend from the rate log (or an NZ Post postcode dataset) as cases surface.
+_POSTCODE_TOWN = {
+    "0505": "Mangawhai",   # Kaipara / Northland — commonly typed as "Auckland"
+}
+
+# Recognised NZ city/hub names (from the postcode + province rate keys). We only
+# correct a destination when the typed city is one of THESE — i.e. a real city that
+# disagrees with its postcode — so a bare suburb typed in the city field (e.g.
+# "Takapuna") is left untouched and keeps today's behaviour.
+_KNOWN_HUBS = (
+    {k for _, _, k, _ in _POSTCODE_KEYS}
+    | {mf for mf, _ in _PROVINCE_KEYS.values()}
+)
+
+
+def _resolve_destination_city(destination: dict) -> tuple:
+    """
+    Correct a destination whose typed city contradicts its postcode, so carriers
+    rate the REAL location. Postcode is Shopify-validated and far more reliable than
+    the free-typed city field. Conservative by design — only overrides when:
+      * the postcode resolves to a rate hub, AND
+      * the typed city ALSO resolves to a *recognised* hub (not a random suburb), AND
+      * those two hubs are in different places.
+    Returns (destination_to_use, correction) where correction is (typed, used) or None.
+    Never mutates the caller's dict (returns a corrected copy) so the rate log still
+    records what the customer actually entered.
+    """
+    pc_raw = (destination.get("postal_code") or destination.get("zip") or "").strip()
+    city = (destination.get("city") or "").strip()
+    if not (pc_raw and city):
+        return destination, None
+    fb = _fallback_keys({"postal_code": pc_raw})   # postcode-only resolution
+    if not fb:
+        return destination, None
+    mf_pc = re.sub(r"_z\d+$", "", fb[0])
+    city_key = re.sub(r"_z\d+$", "", _normalise_city(city))
+    if city_key == mf_pc:
+        return destination, None                   # city agrees with postcode — trust it
+    if city_key not in _KNOWN_HUBS:
+        return destination, None                   # typed a suburb/unknown — leave as-is
+    # Confident conflict: a real city that disagrees with its own postcode.
+    pc4 = re.sub(r"\D", "", pc_raw)[:4]
+    town = _POSTCODE_TOWN.get(pc4) or mf_pc.title()
+    corrected = dict(destination)
+    corrected["city"] = town
+    corrected["suburb"] = town
+    return corrected, (city, town)
+
+
 def _cube_dimensions_cm(weight_kg: float) -> tuple:
     """
     Convert a weight (= CBM in kg) into a cube's side length in cm.
@@ -1142,6 +1197,16 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False,
     """
     cart_cbm = _total_cbm(items)
     quotes = []
+
+    # Correct a destination whose typed city contradicts its postcode BEFORE quoting,
+    # so all three carriers rate the real location (they geocode off city text). e.g.
+    # "Auckland 0505" is actually Mangawhai — rated metro it came back ~half the true
+    # two-man rate. Conservative: only fires on a recognised city/postcode conflict.
+    destination, _city_fix = _resolve_destination_city(destination)
+    if _city_fix:
+        logger.warning("Destination city '%s' contradicts postcode %s — rating as '%s'",
+                       _city_fix[0], destination.get("postal_code") or destination.get("zip"),
+                       _city_fix[1])
 
     # Fire CP (GSS) + live MF + live DF in parallel — they're independent network
     # calls and serial awaits would triple the checkout latency.
