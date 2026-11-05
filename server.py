@@ -120,6 +120,42 @@ async def _start_cbm_sync():
     logger.info("CBM sync scheduler started (every %s min)", CBM_SYNC_INTERVAL_MIN)
 
 
+# ── Background freight reconciliation scheduler ──────────────────────────────
+# Weekly: pull carrier statements from accounts@, parse each consignment, join to
+# the Cin7 order by tracking code, and POST per-consignment margin to NED POS
+# (/api/freight/ingest). Rolling window so new statements + late Cin7 matches are
+# re-reconciled (ingest is an idempotent upsert). Ships dark until
+# FREIGHT_RECON_ENABLED=1. Manual run: python -m reconcile.run_backfill.
+FREIGHT_RECON_ENABLED = os.environ.get("FREIGHT_RECON_ENABLED", "0") == "1"
+FREIGHT_RECON_INTERVAL_MIN = float(os.environ.get("FREIGHT_RECON_INTERVAL_MIN", str(7 * 24 * 60)))
+FREIGHT_RECON_WINDOW_DAYS = int(os.environ.get("FREIGHT_RECON_WINDOW_DAYS", "21"))
+
+
+@app.on_event("startup")
+async def _start_freight_recon():
+    if not FREIGHT_RECON_ENABLED:
+        logger.info("Freight reconciliation scheduler disabled (set FREIGHT_RECON_ENABLED=1)")
+        return
+    import asyncio
+    import datetime as _dt
+    from reconcile.run_backfill import run as _recon_run
+
+    async def _loop():
+        await asyncio.sleep(120)  # let the app warm up
+        while True:
+            try:
+                since = (_dt.date.today() - _dt.timedelta(days=FREIGHT_RECON_WINDOW_DAYS)).isoformat()
+                s = await asyncio.to_thread(_recon_run, since, False)
+                logger.info("Freight recon: %d consignments, %d matched, recovery %s%%, posted %d",
+                            s["consignments"], s["matched"], s["recoveryPct"], s["posted"])
+            except Exception as e:
+                logger.error("Freight recon loop error: %s", e)
+            await asyncio.sleep(FREIGHT_RECON_INTERVAL_MIN * 60)
+
+    asyncio.create_task(_loop())
+    logger.info("Freight reconciliation scheduler started (every %s min)", FREIGHT_RECON_INTERVAL_MIN)
+
+
 @app.middleware("http")
 async def shopify_embed_headers(request, call_next):
     """Allow Shopify admin to embed this app's UI in an iframe."""
