@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -868,6 +869,13 @@ GSS_TIMEOUT = float(os.environ.get("GSS_TIMEOUT", "9.0"))             # full-bud
 # (ATTEMPTS=2, a reduced COURIER_TIMEOUT) if GSS latency is ever measured low enough.
 GSS_COURIER_TIMEOUT = float(os.environ.get("GSS_COURIER_TIMEOUT", "9.0"))
 GSS_COURIER_ATTEMPTS = int(os.environ.get("GSS_COURIER_ATTEMPTS", "1"))
+# Total time budget for ALL GSS calls in one quote (first call + the postcode-city
+# rescue). Measured 9 Nov 2026: freight-sized carts often get 0 options from GSS (too
+# big for courier), and the rescue then made a SECOND full-timeout call — Lawrence 1.2m³
+# took 15.7s end to end, past Shopify's ~10s window, while Mainfreight answered in ~1s.
+# The rescue now only gets whatever is left of this budget, and is skipped if too little.
+GSS_TOTAL_BUDGET = float(os.environ.get("GSS_TOTAL_BUDGET", "8.0"))
+GSS_RESCUE_MIN   = float(os.environ.get("GSS_RESCUE_MIN", "1.5"))   # skip the rescue below this
 
 _cp_cache = None
 
@@ -985,6 +993,8 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     timeout = GSS_COURIER_TIMEOUT if courier_only else GSS_TIMEOUT
     attempts = GSS_COURIER_ATTEMPTS if courier_only else 1
     data = None
+    _t0 = time.monotonic()
+    timeout = min(timeout, GSS_TOTAL_BUDGET)
     for attempt in range(1, attempts + 1):
         try:
             r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=timeout)
@@ -1011,13 +1021,16 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
         # response came back fast (GSS answered), so the extra call stays inside the window.
         fb = _fallback_keys(destination)
         pc_city = fb[0] if fb else None
-        if pc_city and _strip_diacritics(pc_city.lower()) != _strip_diacritics(gss_city.lower()):
+        _left = GSS_TOTAL_BUDGET - (time.monotonic() - _t0)
+        if _left < GSS_RESCUE_MIN:
+            logger.info("GSS postcode-city rescue skipped for %s: only %.1fs of budget left", _dest_label, _left)
+        elif pc_city and _strip_diacritics(pc_city.lower()) != _strip_diacritics(gss_city.lower()):
             # Overwrite BOTH City and Suburb — a region name left in Suburb ("Bay of
             # Plenty") still breaks GSS geocoding even once the City is corrected.
             payload["Destination"]["Address"]["City"] = pc_city
             payload["Destination"]["Address"]["Suburb"] = pc_city
             try:
-                r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=timeout)
+                r = await _client.post(GSS_URL, json=payload, headers=headers, timeout=_left)
                 if r.status_code == 200:
                     data = r.json()
                     options = data.get("Available", [])
