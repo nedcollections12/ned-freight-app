@@ -96,6 +96,66 @@ NED_MARKUP     = float(os.environ.get("NED_MARKUP", "1.10"))       # NED's margi
 # Strip it to get the carrier's true cost, then re-apply NED markup.
 GSS_BUILTIN_MARKUP = 1.08
 
+# ── Rural delivery surcharge buffer ───────────────────────────────────────────
+# GoSweetSpot's rating QUOTE under-flags rural addresses: it returns
+# IsRuralDelivery=False for genuine rural-delivery zones (confirmed on Mangawhai
+# 0505 — no address framing flips it), so the quote OMITS the rural surcharge that
+# Castle/Kiwi then add on the actual freight INVOICE. Result: we charged below our
+# own freight cost on rural lanes (carrier_reconciliation_CP.csv: Eureka -$19.26,
+# Pyes Pa -$5.57, Te Awamutu -$5.02...). When the destination postcode is a known
+# rural-delivery zone but GSS didn't flag it, add Castle's rural surcharge to the CP
+# cost basis (NED markup then applies on top, same as the rest of the cost).
+#
+# Castle charges rural delivery PER CARTON. Measured 9 Nov 2026 from GSS itself
+# (Morrinsville 3300 urban vs 3371 RD1, same cart): Post Haste adds $9.17 per carton
+# in GSS's Cost (1 carton +$9.17, 3 cartons +$27.51) = $8.49/carton after stripping
+# GSS's 8% — consistent with the rate card's $7.09 ex-GST + FAF. Kiwi Express Oversize
+# read ~$9.50-$19/carton (less consistent), so oversize keeps the $18 placeholder.
+# When GSS DOES flag rural, the fee is already in its Cost and nothing is added.
+# Override per carton (incl GST) via env. Kill switch: RURAL_SURCHARGE_ENABLED=0.
+RURAL_SURCHARGE_ENABLED  = os.environ.get("RURAL_SURCHARGE_ENABLED", "1") != "0"
+RURAL_SURCHARGE_COURIER  = float(os.environ.get("RURAL_SURCHARGE_COURIER", "8.49"))   # incl GST, per carton
+RURAL_SURCHARGE_OVERSIZE = float(os.environ.get("RURAL_SURCHARGE_OVERSIZE", "18.0"))  # incl GST, per carton
+
+# Postcodes that ARE rural-delivery but GSS returns IsRuralDelivery=False for.
+# Seeded with the one lane we've confirmed (Mangawhai); extend from Castle invoices
+# or an NZ Post rural-delivery postcode dataset. Env RURAL_POSTCODES_EXTRA adds
+# comma-separated 4-digit codes without a code change (e.g. "3112,3287,3800").
+_RURAL_POSTCODES = {"0505"}  # Mangawhai (Kaipara, Northland)
+_RURAL_POSTCODES |= {
+    p.strip() for p in os.environ.get("RURAL_POSTCODES_EXTRA", "").split(",") if p.strip()
+}
+
+
+_RD_RE = re.compile(r"\bR\.?\s?D\.?\s*\d{1,2}\b", re.IGNORECASE)
+
+
+def _is_rural_address(destination: dict) -> bool:
+    """
+    True for an NZ rural-delivery address: an "RD n" line (NZ Post's rural-delivery
+    marker, e.g. "RD1" / "R.D. 2") anywhere in the address, or a known-rural postcode.
+    """
+    text = " ".join(str(destination.get(k) or "") for k in ("address1", "address2", "address3", "city"))
+    if _RD_RE.search(text):
+        return True
+    pc4 = re.sub(r"\D", "", (destination.get("postal_code") or destination.get("zip") or ""))[:4]
+    return pc4 in _RURAL_POSTCODES
+
+
+def _rural_surcharge(destination: dict, is_rural_flagged: bool, service_or_carrier: str,
+                     n_cartons: int = 1) -> float:
+    """
+    Per-carton rural fee to add to a Castle Parcels cost when the address is rural
+    (an "RD n" line or a known-rural postcode) but GSS didn't flag it. Returns 0 when
+    disabled, when GSS already flagged rural (fee is then already in the Cost), or when
+    the address isn't rural. Oversize services use the larger per-carton fee.
+    """
+    if not RURAL_SURCHARGE_ENABLED or is_rural_flagged or not _is_rural_address(destination):
+        return 0.0
+    label = (service_or_carrier or "").lower()
+    per = RURAL_SURCHARGE_OVERSIZE if "oversize" in label else RURAL_SURCHARGE_COURIER
+    return round(per * max(1, int(n_cartons)), 2)
+
 _carrier_rates_cache = None
 
 
@@ -262,38 +322,65 @@ def _normalise_city(city: str) -> str:
 # Each entry maps to (mainfreight_key, dailyfreight_key) because MF uses flat
 # city keys while DF uses zoned keys. Ranges are inclusive 4-digit postcodes.
 _POSTCODE_KEYS = [
-    (100,  409,  "whangarei",        "whangarei"),       # Northland (Whangarei, Dargaville, Kerikeri, Paihia)
+    # Ranges checked 9 Nov 2026 against ~7,200 NZ Shopify order/customer addresses
+    # plus the rate log (town typed vs postcode). Where a town has a city_aliases
+    # entry, its range MUST map to the same hub, or _resolve_destination_city will
+    # "correct" that town to the wrong place. Still hand-built: an NZ Post
+    # postcode→locality list is the long-term source of truth.
+    (100,  409,  "whangarei",        "whangarei"),        # Northland (Whangarei, Dargaville, Kerikeri, Paihia)
     (410,  499,  "kaitaia",          "kaitaia"),          # Far North (Kaitaia)
     (500,  599,  "whangarei",        "whangarei"),        # Kaipara
     (600,  999,  "auckland",         "auckland_z1"),      # North Shore / Rodney / West Auckland
-    (1010, 1099, "auckland",         "auckland_z1"),      # Auckland central / isthmus / east
+    (1010, 1839, "auckland",         "auckland_z1"),      # Auckland central / isthmus / east + PO boxes
+    (1840, 1999, "auckland",         "auckland_z9"),      # Waiheke Island PO boxes / RD (1841, 1971)
     (2000, 2999, "auckland",         "auckland_z1"),      # South Auckland / Manukau / Papakura / Pukekohe
     (3010, 3099, "rotorua",          "rotorua"),          # Rotorua
     (3110, 3119, "tauranga",         "tauranga"),         # Tauranga / Mt Maunganui / Papamoa / Te Puke
-    (3120, 3199, "rotorua",          "whakatane"),        # Eastern BoP (Whakatane, Opotiki)
+    (3120, 3128, "rotorua",          "whakatane"),        # Whakatane 3120 / Ohope 3121 / Opotiki 3122 / Kawerau 3127
+    (3129, 3157, "tauranga",         "tauranga"),         # Katikati 3129 + Tauranga PO boxes (3150)
+    (3158, 3169, "rotorua",          "whakatane"),        # Eastern BoP PO boxes
+    (3170, 3189, "tauranga",         "tauranga"),         # Western BoP RDs: Katikati, Omokoroa, Te Puna, Pyes Pa, Te Puke (3173, 3187)
+    (3190, 3199, "rotorua",          "whakatane"),        # Eastern BoP RDs: Whakatane, Matata, Waimana, Opotiki
     (3200, 3299, "hamilton",         "hamilton_z1"),      # Hamilton
-    (3330, 3399, "taupo",            "taupo"),            # Taupo / Turangi
-    (3400, 3499, "hamilton",         "hamilton_z1"),      # Cambridge / Te Awamutu / Otorohanga
-    (3500, 3599, "thames",           "thames"),           # Thames / Coromandel
+    # 33xx is mixed: Taupō/Tūrangi sit between Morrinsville / Te Aroha rural-delivery
+    # codes. A blanket 3330-3399 → Taupō misrated Morrinsville RD 3371 (NED4200).
+    (3300, 3329, "hamilton",         "hamilton_z3"),      # Morrinsville 3300 / Te Aroha 3320
+    (3330, 3369, "taupo",            "taupo"),            # Taupo 3330 / Turangi 3334 / PO boxes
+    (3370, 3376, "hamilton",         "hamilton_z3"),      # Morrinsville RDs (3371-3375)
+    (3377, 3389, "taupo",            "taupo"),            # Taupo / Turangi RDs
+    (3390, 3399, "hamilton",         "hamilton_z3"),      # Te Aroha RDs (3391-3393)
+    (3400, 3499, "hamilton",         "hamilton_z1"),      # Cambridge / Matamata / Putaruru / Tokoroa
+    (3500, 3699, "thames",           "thames"),           # Thames / Coromandel + Hauraki: Paeroa 3600, Waihi 3610, Whangamata 3620
+    (3700, 3899, "hamilton",         "hamilton_z3"),      # Huntly / Ngaruawahia / Te Kauwhata + Te Awamutu 3800 / Ohaupo
+    (3900, 3909, "hamilton",         "hamilton_z3"),      # Otorohanga 3900
+    (3910, 3971, "hamilton",         "hamilton_z10"),     # Te Kuiti 3910 / Piopio 3912 / Taumarunui 3920 + RDs
+    (3972, 3979, "hamilton",         "hamilton_z3"),      # Otorohanga RDs (3973)
+    (3980, 3999, "hamilton",         "hamilton_z10"),     # Taumarunui RDs (Retaruke 3990)
     (4010, 4099, "gisborne",         "gisborne"),         # Gisborne
     (4100, 4299, "napier",           "napier"),           # Hawke's Bay (Napier, Hastings, Waipukurau)
     (4300, 4399, "new plymouth",     "new plymouth"),     # Taranaki (New Plymouth, Stratford)
-    (4400, 4499, "palmerston north", "palmerston north"), # Manawatu (PN, Feilding, Dannevirke)
+    (4400, 4499, "palmerston north", "palmerston north"), # Manawatu (PN)
     (4500, 4699, "wanganui",         "wanganui"),         # Whanganui + South Taranaki (Hawera)
+    (4700, 4999, "palmerston north", "palmerston north"), # Feilding 4702 / Marton / Taihape / Ashhurst / Foxton / Pahiatua 4910 / Dannevirke 4930
     (5010, 5099, "wellington",       "wellington"),       # Hutt / Porirua / Kapiti
-    (5500, 5599, "levin",            "levin"),            # Horowhenua (Levin)
-    (5800, 5899, "wellington",       "masterton"),        # Wairarapa (Masterton)
-    (6010, 6099, "wellington",       "wellington"),       # Wellington city
-    (7010, 7199, "nelson",           "nelson"),           # Nelson / Tasman (Richmond, Motueka)
+    (5100, 5499, "wellington",       "wellington"),       # Wellington-region PO boxes / Kapiti RDs (5391 Waikanae)
+    (5500, 5599, "levin",            "levin"),            # Horowhenua (Levin, Otaki)
+    (5700, 5899, "wellington",       "masterton"),        # Wairarapa: Featherston 5710 / Martinborough 5711 / Greytown 5712 / Carterton 5713 / Masterton
+    (6010, 6999, "wellington",       "wellington"),       # Wellington city + PO boxes
+    (7000, 7199, "nelson",           "nelson"),           # Nelson / Tasman (Mapua 7005, Richmond, Motueka)
     (7200, 7399, "blenheim",         "blenheim"),         # Marlborough (Blenheim, Picton) + Kaikoura / Hanmer
     (7400, 7699, "christchurch",     "christchurch"),     # North Canterbury (Rangiora, Amberley, Oxford)
     (7700, 7799, "christchurch",     "ashburton"),        # Mid Canterbury (Ashburton)
     (7800, 7899, "greymouth",        "greymouth"),        # West Coast (Greymouth, Hokitika, Westport)
     (7900, 7999, "timaru",           "timaru"),           # South Canterbury (Timaru)
-    (8010, 8099, "christchurch",     "christchurch"),     # Christchurch city
-    (9000, 9099, "dunedin",          "dunedin"),          # Dunedin
+    (8010, 8999, "christchurch",     "christchurch"),     # Christchurch city + PO boxes + Banks Peninsula RDs (8971)
+    (9000, 9299, "dunedin",          "dunedin"),          # Dunedin + Clutha (Balclutha 9230, Kaitangata 9210, Milton)
     (9300, 9399, "cromwell",         "cromwell_z1"),      # Central Otago (Cromwell, Alexandra, Queenstown, Wanaka)
     (9400, 9499, "oamaru",           "oamaru"),           # Waitaki (Oamaru)
+    (9532, 9532, "cromwell",         "cromwell_z5"),      # Lawrence (matches its city alias)
+    (9583, 9589, "dunedin",          "dunedin"),          # Clutha RDs (Clinton, Waiwera South)
+    (9591, 9591, "cromwell",         "cromwell_z5"),      # Lawrence RD (Craigellachie)
+    (9600, 9699, "invercargill",     "invercargill"),     # Te Anau / western Southland RDs (Otautau, Isla Bank)
     (9700, 9799, "invercargill",     "gore"),             # Gore / Eastern Southland
     (9800, 9899, "invercargill",     "invercargill"),     # Invercargill / Southland
 ]
@@ -372,6 +459,48 @@ _KNOWN_HUBS = (
 )
 
 
+_FUZZY_CUTOFF = float(os.environ.get("TOWN_FUZZY_CUTOFF", "0.88"))
+
+
+def _town_vocab() -> dict:
+    """Known town spellings → rate hub (alias table keys, hub names, postcode towns)."""
+    rates = _load_carrier_rates()
+    vocab = {}
+    for name, key in (rates.get("city_aliases") or {}).items():
+        if not name.startswith("_") and isinstance(key, str):
+            vocab[name] = re.sub(r"_z\d+$", "", key)
+    for hub in _KNOWN_HUBS:
+        vocab.setdefault(hub, hub)
+    for town in _POSTCODE_TOWN.values():
+        t = _strip_diacritics(town.lower())
+        vocab.setdefault(t, re.sub(r"_z\d+$", "", _normalise_city(t)))
+    return vocab
+
+
+def _fuzzy_town(city: str, destination: dict) -> Optional[str]:
+    """
+    Return the correctly-spelt town for a typo'd city, or None. Conservative:
+      * only when the typed text is NOT already a known town/alias,
+      * the closest known spelling scores >= _FUZZY_CUTOFF (Morinsville→Morrinsville
+        0.96; Te Puke vs Te Puna 0.86 is NOT merged), and
+      * that town's rate hub matches the postcode's hub (or the region's, if the
+        postcode isn't in the table) — so a typo is never "corrected" across the country.
+    """
+    import difflib
+    typed = _strip_diacritics(city.strip().lower())
+    vocab = _town_vocab()
+    if not typed or typed in vocab:
+        return None
+    match = difflib.get_close_matches(typed, list(vocab), n=1, cutoff=_FUZZY_CUTOFF)
+    if not match:
+        return None
+    area = _fallback_keys({"postal_code": destination.get("postal_code") or destination.get("zip") or "",
+                           "province": destination.get("province") or ""})
+    if not area or re.sub(r"_z\d+$", "", area[0]) != vocab[match[0]]:
+        return None
+    return match[0].title()
+
+
 def _resolve_destination_city(destination: dict) -> tuple:
     """
     Correct a destination whose typed city contradicts its postcode, so carriers
@@ -388,6 +517,17 @@ def _resolve_destination_city(destination: dict) -> tuple:
     city = (destination.get("city") or "").strip()
     if not (pc_raw and city):
         return destination, None
+
+    # Misspelt town ("Morinsville", "Christchurvh"): GSS and the Mainfreight API geocode
+    # off the town text and return nothing for a typo. Snap it to the closest known town
+    # when that town sits in the same area as the postcode (or region).
+    fixed = _fuzzy_town(city, destination)
+    if fixed:
+        corrected = dict(destination)
+        corrected["city"] = fixed
+        corrected["suburb"] = fixed
+        return corrected, (city, fixed)
+
     fb = _fallback_keys({"postal_code": pc_raw})   # postcode-only resolution
     if not fb:
         return destination, None
@@ -887,12 +1027,27 @@ async def quote_castle_parcels(items: list, destination: dict) -> Optional[dict]
     gss_cost = float(cheapest.get("Cost", 0))
     true_cost = gss_cost / GSS_BUILTIN_MARKUP  # strip GSS's 8%
 
+    # Rural buffer: GSS's quote omits the rural surcharge on lanes it mis-flags as
+    # urban (e.g. Mangawhai) — add it to the cost basis so we don't quote below the
+    # invoice. Per carton (Castle bills each parcel). No-op when GSS already flagged rural.
+    is_rural = cheapest.get("IsRuralDelivery", False)
+    carrier = cheapest.get("CarrierName", "Castle Parcels")
+    service = cheapest.get("DeliveryType", "Standard")
+    n_cartons = len(payload["Packages"])
+    surcharge = _rural_surcharge(destination, is_rural, f"{carrier} {service}", n_cartons)
+    source = "GoSweetSpot live API"
+    if surcharge:
+        true_cost += surcharge
+        source += f" + rural ${surcharge:.2f} ({n_cartons} carton{'s' if n_cartons != 1 else ''})"
+        logger.info("Rural buffer +$%.2f applied to %s (GSS rural=False, known-rural postcode)",
+                    surcharge, _dest_label)
+
     return {
-        "carrier":   cheapest.get("CarrierName", "Castle Parcels"),
-        "service":   cheapest.get("DeliveryType", "Standard"),
+        "carrier":   carrier,
+        "service":   service,
         "raw_cost":  round(true_cost, 2),  # incl FAF+GST already
-        "is_rural":  cheapest.get("IsRuralDelivery", False),
-        "_source":   "GoSweetSpot live API",
+        "is_rural":  is_rural or bool(surcharge),
+        "_source":   source,
     }
 
 
@@ -1269,8 +1424,15 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False,
     # Also rescues the empty-quotes case for a small courier cart.
     _dlabel = f"{destination.get('city', '?')} {destination.get('postal_code') or destination.get('zip') or ''}".strip()
 
+    # Rural per-carton fee for the % fallbacks: the 8% models an urban courier cost, so a
+    # rural address adds Castle's per-carton rural fee (marked up like any carrier cost).
+    _rural_fb = _rural_surcharge(destination, False, "courier", len(_build_packages(items)))
+
     def _pct_quote(ex_gst: float, note: str) -> dict:
         price = round(max(ex_gst * COURIER_FALLBACK_PCT, COURIER_FALLBACK_MIN), 2)
+        if _rural_fb and price > 0:
+            price = round(price + _rural_fb * NED_MARKUP, 2)
+            note += f" + rural ${_rural_fb:.2f}"
         return {
             "carrier": "Standard Delivery", "service": "Courier",
             # raw_cost back-calculated so the ×NED_MARKUP below lands exactly on `price`
@@ -1282,13 +1444,22 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False,
     # Courier fallback: a courier-only cart with NO courier quote means Castle Parcels
     # dropped out — the MF/DF freight minimums (~$90+) are nonsensical for courier goods.
     # Replace them with % of the ex-GST order (or the floor when the cart value is missing).
+    #
+    # EXCEPT on a rural-delivery address that still has a live MF/DF quote: rural courier
+    # costs far more than the urban average the 8% models (NED4200, Morrinsville RD1:
+    # CP $119 / MF $113 real vs $46 fallback), so keep the real freight quotes there.
+    # Rural with nothing quoted still gets the % (below) rather than no rate.
+    discarded = []
+    rural_keep = _is_rural_address(destination) and bool(quotes)
     if (COURIER_FALLBACK_ENABLED
+            and not rural_keep
             and not any(_is_courier_quote(q) for q in quotes)
             and _cart_is_courier_only(items)):
         ex_gst = _order_value_incl_gst(items) / GST_MULTIPLIER
         fb = _pct_quote(ex_gst, f"Courier fallback {COURIER_FALLBACK_PCT*100:.0f}% of ex-GST order "
                                 f"(${ex_gst:.2f}) — Castle Parcels unavailable")
         if fb["_price"] > 0:   # guard: no value AND no floor → don't zero-out shipping
+            discarded = [{**q, "_discarded": "courier_fallback"} for q in quotes]
             quotes = [fb]
             logger.warning("Courier fallback for %s: CP unavailable on %.3fm³ → $%.2f", _dlabel, cart_cbm, fb["_price"])
             if count_alerts:
@@ -1339,7 +1510,9 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False,
         "customer_price":  customer_price,
     }
     if debug:
-        result["all_quotes"] = quotes  # full set considered
+        # Full set considered, plus any MF/DF quotes the courier fallback replaced
+        # (flagged _discarded) so the rate log shows what the carriers really returned.
+        result["all_quotes"] = quotes + discarded
         result["eligible_quotes"] = eligible  # after service-rule filtering
         # Report the rule that actually changed the eligible set (not just what was tested)
         if cheapest.get("_fallback"):
