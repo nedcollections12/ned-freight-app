@@ -99,5 +99,32 @@ check("Lawrence 9591 keeps its town", lr._resolve_destination_city({"city": "Law
 _k = sorted(lr._POSTCODE_KEYS)
 check("postcode ranges don't overlap", all(a[1] < b[0] for a, b in zip(_k, _k[1:])), True)
 
+# Courier fallback is priced by volume, not order value (NED4200: trade carts had GST
+# stripped twice). Same cart, retail vs trade prices -> same freight.
+def _fb(dest, price_cents):
+    async def go():
+        lr.LIVE_ONLY = True; lr._oversize_ids_cache = set()
+        async def miss(*a): return None
+        lr.quote_castle_parcels = miss
+        items = [{"grams": 80, "quantity": 1, "price": price_cents, "variant_id": 0}]
+        return await lr.calculate_freight(items, dest, debug=True)
+    return asyncio.run(go())
+lr.COURIER_FALLBACK_MODE = "cbm"
+AKL = {"city": "Auckland", "zip": "1010", "province": "AUK", "country": "NZ", "address1": "1 Queen St"}
+CHC = {"city": "Christchurch", "zip": "8011", "province": "CAN", "country": "NZ", "address1": "1 High St"}
+ra, rb = _fb(AKL, 100000), _fb(AKL, 86957)
+check("fallback same for retail vs trade-priced cart", ra["customer_price"], rb["customer_price"])
+check("fallback uses volume", "by volume" in ra["all_quotes"][0]["_source"], True)
+import math
+check("NI fallback = ($8.55 + $340/m3) x markup", ra["customer_price"],
+      round((8.55 + 340*0.08) * lr.NED_MARKUP, 2))
+check("SI fallback cheaper than NI", _fb(CHC, 100000)["customer_price"] < ra["customer_price"], True)
+lr.COURIER_FALLBACK_MODE = "pct"
+check("pct mode still available", "% of ex-GST" in _fb(AKL, 100000)["all_quotes"][0]["_source"], True)
+lr.COURIER_FALLBACK_MODE = "cbm"
+
+# Oversize rural fee: once per delivery (measured), courier: per carton.
+check("oversize rural fee per consignment", lr._rural_surcharge(MORR, False, "Kiwi Express Oversize", 3), round(lr.RURAL_SURCHARGE_OVERSIZE, 2))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

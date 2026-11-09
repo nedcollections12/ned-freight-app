@@ -110,12 +110,16 @@ GSS_BUILTIN_MARKUP = 1.08
 # (Morrinsville 3300 urban vs 3371 RD1, same cart): Post Haste adds $9.17 per carton
 # in GSS's Cost (1 carton +$9.17, 3 cartons +$27.51) = $8.49/carton after stripping
 # GSS's 8% — consistent with the rate card's $7.09 ex-GST + FAF. Kiwi Express Oversize
-# read ~$9.50-$19/carton (less consistent), so oversize keeps the $18 placeholder.
+# read ~$9.50-$19/carton (less consistent) at first. Re-measured 9 Nov 2026 on clean
+# same-zone pairs (Tauranga 3112 vs 3187, Rangiora 7400 vs 7471; 1x0.20, 2x0.20, 1x0.35
+# m³): Kiwi Express Oversize adds $9.11 in GSS's Cost PER CONSIGNMENT (2 cartons still
+# +$9.11) = $8.44 after stripping GSS's 8%. (Morrinsville/Te Aroha diffs were bigger
+# only because 3371/3392 also sit in a dearer zone.) So oversize is per delivery.
 # When GSS DOES flag rural, the fee is already in its Cost and nothing is added.
 # Override per carton (incl GST) via env. Kill switch: RURAL_SURCHARGE_ENABLED=0.
 RURAL_SURCHARGE_ENABLED  = os.environ.get("RURAL_SURCHARGE_ENABLED", "1") != "0"
 RURAL_SURCHARGE_COURIER  = float(os.environ.get("RURAL_SURCHARGE_COURIER", "8.49"))   # incl GST, per carton
-RURAL_SURCHARGE_OVERSIZE = float(os.environ.get("RURAL_SURCHARGE_OVERSIZE", "18.0"))  # incl GST, per carton
+RURAL_SURCHARGE_OVERSIZE = float(os.environ.get("RURAL_SURCHARGE_OVERSIZE", "8.44"))  # incl GST, per consignment
 
 # Postcodes that ARE rural-delivery but GSS returns IsRuralDelivery=False for.
 # Seeded with the one lane we've confirmed (Mangawhai); extend from Castle invoices
@@ -148,13 +152,14 @@ def _rural_surcharge(destination: dict, is_rural_flagged: bool, service_or_carri
     Per-carton rural fee to add to a Castle Parcels cost when the address is rural
     (an "RD n" line or a known-rural postcode) but GSS didn't flag it. Returns 0 when
     disabled, when GSS already flagged rural (fee is then already in the Cost), or when
-    the address isn't rural. Oversize services use the larger per-carton fee.
+    the address isn't rural. Courier is charged per carton; oversize once per delivery.
     """
     if not RURAL_SURCHARGE_ENABLED or is_rural_flagged or not _is_rural_address(destination):
         return 0.0
     label = (service_or_carrier or "").lower()
-    per = RURAL_SURCHARGE_OVERSIZE if "oversize" in label else RURAL_SURCHARGE_COURIER
-    return round(per * max(1, int(n_cartons)), 2)
+    if "oversize" in label:
+        return round(RURAL_SURCHARGE_OVERSIZE, 2)          # per consignment
+    return round(RURAL_SURCHARGE_COURIER * max(1, int(n_cartons)), 2)  # per carton
 
 _carrier_rates_cache = None
 
@@ -204,6 +209,37 @@ PALLET_MIN_CBM = float(os.environ.get("PALLET_MIN_CBM", "0.8"))
 COURIER_FALLBACK_ENABLED = os.environ.get("COURIER_FALLBACK_ENABLED", "1") != "0"
 COURIER_FALLBACK_PCT = float(os.environ.get("COURIER_FALLBACK_PCT", "0.08"))  # 8% of ex-GST order
 COURIER_FALLBACK_MIN = float(os.environ.get("COURIER_FALLBACK_MIN", "0"))     # optional $ floor (0 = off)
+
+# Volume-based courier fallback (default). The % of order value had two problems: it
+# tracks price, not size (median 75% off the real Castle cost across the last 2,000
+# quotes), and the rate request doesn't say whether the cart is trade, so B2B carts
+# (prices already ex-GST) had GST stripped twice (NED4200). Instead estimate Castle's
+# cost from cart CBM, fitted 9 Nov 2026 on 1,071 real non-rural GSS quotes ex-CHCH
+# (raw_cost incl GST, GSS 8% stripped): North Island ≈ $8.55 + $340/m³ (median error
+# 7%), South Island ≈ $9.50 + $66/m³ (28%). NED_MARKUP and the rural fee go on top,
+# exactly like a live CP quote. Set COURIER_FALLBACK_MODE=pct to go back to the %.
+COURIER_FALLBACK_MODE = os.environ.get("COURIER_FALLBACK_MODE", "cbm").lower()
+COURIER_FB_NI_BASE   = float(os.environ.get("COURIER_FB_NI_BASE", "8.55"))
+COURIER_FB_NI_PER_M3 = float(os.environ.get("COURIER_FB_NI_PER_M3", "340"))
+COURIER_FB_SI_BASE   = float(os.environ.get("COURIER_FB_SI_BASE", "9.50"))
+COURIER_FB_SI_PER_M3 = float(os.environ.get("COURIER_FB_SI_PER_M3", "66"))
+
+
+def _is_south_island(destination: dict) -> Optional[bool]:
+    """South Island from the postcode (7xxx-9xxx), else None when unknown."""
+    pc = re.sub(r"\D", "", (destination.get("postal_code") or destination.get("zip") or ""))[:4]
+    if len(pc) == 4:
+        return pc[0] in "789"
+    return None
+
+
+def _cbm_courier_cost(cart_cbm: float, destination: dict) -> tuple:
+    """Estimated Castle Parcels raw cost (incl GST) for a courier cart, and a label.
+    Unknown island prices as North Island (the dearer lane from CHCH)."""
+    si = _is_south_island(destination)
+    if si:
+        return COURIER_FB_SI_BASE + COURIER_FB_SI_PER_M3 * cart_cbm, "South Island"
+    return COURIER_FB_NI_BASE + COURIER_FB_NI_PER_M3 * cart_cbm, ("North Island" if si is False else "island unknown")
 
 # Mainfreight Rating API resilience: one fast retry on a transient miss (timeout /
 # 5xx / connection reset) so a single blip doesn't drop MF/DF to "Contact Us" under
@@ -1428,6 +1464,18 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False,
     # rural address adds Castle's per-carton rural fee (marked up like any carrier cost).
     _rural_fb = _rural_surcharge(destination, False, "courier", len(_build_packages(items)))
 
+    def _cbm_quote(note: str) -> dict:
+        cost, lane = _cbm_courier_cost(cart_cbm, destination)
+        price = round(max((cost + _rural_fb) * NED_MARKUP, COURIER_FALLBACK_MIN), 2)
+        note += f" — est. Castle ${cost:.2f} ({lane}, {cart_cbm:.3f}m³)"
+        if _rural_fb:
+            note += f" + rural ${_rural_fb:.2f}"
+        return {
+            "carrier": "Standard Delivery", "service": "Courier",
+            "raw_cost": round(price / NED_MARKUP, 2),
+            "_source": note, "_fallback": True, "_price": price,
+        }
+
     def _pct_quote(ex_gst: float, note: str) -> dict:
         price = round(max(ex_gst * COURIER_FALLBACK_PCT, COURIER_FALLBACK_MIN), 2)
         if _rural_fb and price > 0:
@@ -1455,9 +1503,12 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False,
             and not rural_keep
             and not any(_is_courier_quote(q) for q in quotes)
             and _cart_is_courier_only(items)):
-        ex_gst = _order_value_incl_gst(items) / GST_MULTIPLIER
-        fb = _pct_quote(ex_gst, f"Courier fallback {COURIER_FALLBACK_PCT*100:.0f}% of ex-GST order "
-                                f"(${ex_gst:.2f}) — Castle Parcels unavailable")
+        if COURIER_FALLBACK_MODE == "pct":
+            ex_gst = _order_value_incl_gst(items) / GST_MULTIPLIER
+            fb = _pct_quote(ex_gst, f"Courier fallback {COURIER_FALLBACK_PCT*100:.0f}% of ex-GST order "
+                                    f"(${ex_gst:.2f}) — Castle Parcels unavailable")
+        else:
+            fb = _cbm_quote("Courier fallback by volume — Castle Parcels unavailable")
         if fb["_price"] > 0:   # guard: no value AND no floor → don't zero-out shipping
             discarded = [{**q, "_discarded": "courier_fallback"} for q in quotes]
             quotes = [fb]
@@ -1469,6 +1520,12 @@ async def calculate_freight(items: list, destination: dict, debug: bool = False,
     # order so the customer still gets a rate instead of no_carrier_match (lost sale / free
     # ship). This is the "if all carriers are down, give the 8%" case — now covering freight
     # carts too, not just courier ones.
+    if not quotes and COURIER_FALLBACK_ENABLED and COURIER_FALLBACK_MODE != "pct" and _cart_is_courier_only(items):
+        fb = _cbm_quote("Last-resort by volume — ALL carriers unavailable")
+        quotes = [fb]
+        logger.error("ALL carriers down for %s — last-resort $%.2f on %.3fm³", _dlabel, fb["_price"], cart_cbm)
+        if count_alerts:
+            alerts.record_all_carriers_down(f"{_dlabel}: ${fb['_price']} by volume, {cart_cbm:.3f}m³")
     if not quotes and COURIER_FALLBACK_ENABLED:
         ov = _order_value_incl_gst(items)
         if ov > 0:
