@@ -92,6 +92,15 @@ ORIGIN_AKL_ADDRESS = {
 FAF_MULTIPLIER = float(os.environ.get("FAF_MULTIPLIER", "1.30"))   # Fuel adjustment
 GST_MULTIPLIER = float(os.environ.get("GST_MULTIPLIER", "1.15"))   # NZ GST 15%
 NED_MARKUP     = float(os.environ.get("NED_MARKUP", "1.10"))       # NED's margin
+# Dailyfreight residential delivery fee: $35 ex-GST per consignment, NOT subject to FAF.
+# Neither the Mainfreight Rating API request nor the rate card includes it, and we can't
+# reliably tell a home from a business at checkout, so it's added to every DF quote.
+DF_RESIDENTIAL_FEE = float(os.environ.get("DF_RESIDENTIAL_FEE", "35"))  # ex-GST, no FAF
+
+
+def _df_with_residential(raw_cost: float) -> float:
+    """Add the DF residential fee (× GST only) to a GST-inclusive DF raw cost."""
+    return raw_cost + DF_RESIDENTIAL_FEE * GST_MULTIPLIER
 
 # GoSweetSpot's "Cost" field already includes their 8% markup (NED pays this).
 # Strip it to get the carrier's true cost, then re-apply NED markup.
@@ -1164,13 +1173,13 @@ def quote_dailyfreight(cart_cbm: float, destination: dict, override_key: Optiona
     per_m3 = rate["tiers"][tier_idx]
     base = rate["base"]
     raw_excl = max(base, per_m3 * cart_cbm)
-    raw_cost = raw_excl * FAF_MULTIPLIER * GST_MULTIPLIER
+    raw_cost = _df_with_residential(raw_excl * FAF_MULTIPLIER * GST_MULTIPLIER)
     tier_label = ["<5m³", "5-10m³", "≥10m³"][tier_idx]
     return {
         "carrier":   "Dailyfreight",
         "service":   "LCL Palletised",
         "raw_cost":  round(raw_cost, 2),
-        "_source":   f"{rate_key} tier {tier_label}: MAX({base}, {per_m3} × {cart_cbm:.3f}) × FAF × GST",
+        "_source":   f"{rate_key} tier {tier_label}: MAX({base}, {per_m3} × {cart_cbm:.3f}) × FAF × GST + resi",
     }
 
 
@@ -1275,7 +1284,7 @@ async def quote_dailyfreight_live(cart_cbm: float, destination: dict) -> Optiona
     return {
         "carrier":  "Dailyfreight",
         "service":  "LCL Palletised",
-        "raw_cost": round(cost, 2),  # already incl FAF + GST per API response
+        "raw_cost": round(_df_with_residential(cost), 2),  # API total (incl FAF+GST) + residential fee
         "_source":  f"Mainfreight Rating API (live) — NEDCOLDF/LCL @ {cart_cbm:.3f}m³",
     }
 
@@ -1321,7 +1330,7 @@ async def quote_dailyfreight_akl_live(cart_cbm: float, destination: dict) -> Opt
     return {
         "carrier":  "Dailyfreight",
         "service":  "LCL Palletised (ex-Auckland)",
-        "raw_cost": round(cost, 2),  # already incl FAF + GST per API response
+        "raw_cost": round(_df_with_residential(cost), 2),  # API total (incl FAF+GST) + residential fee
         "_source":  f"Mainfreight Rating API (live) — NEDCOLDF/LCL ex-AKL @ {cart_cbm:.3f}m³",
     }
 
@@ -1348,13 +1357,13 @@ def quote_dailyfreight_akl(cart_cbm: float, destination: dict, override_key: Opt
     tier_idx = _df_tier_index(cart_cbm)
     per_m3 = rate["tiers"][tier_idx]
     base = rate["base"]
-    raw_cost = max(base, per_m3 * cart_cbm) * FAF_MULTIPLIER * GST_MULTIPLIER
+    raw_cost = _df_with_residential(max(base, per_m3 * cart_cbm) * FAF_MULTIPLIER * GST_MULTIPLIER)
     return {
         "carrier":  "Dailyfreight",
         "service":  "LCL Palletised (ex-Auckland)",
         "raw_cost": round(raw_cost, 2),
         "_source":  f"ex-AKL card {rate_key} tier {['<5m³','5-10m³','≥10m³'][tier_idx]}: "
-                    f"MAX({base}, {per_m3} × {cart_cbm:.3f}) × FAF × GST",
+                    f"MAX({base}, {per_m3} × {cart_cbm:.3f}) × FAF × GST + resi",
     }
 
 
